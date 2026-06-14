@@ -106,15 +106,15 @@ async def mcp_token_guard(request: Request, call_next):
     """Schützt /mcp mit einem statischen Token-Header (wie NocoDB xc-mcp-token).
     Header: ``x-curastro-token`` oder ``Authorization: Bearer <token>``."""
     if request.url.path == "/mcp" or request.url.path.startswith("/mcp/"):
-        expected = await mcp_config.get_effective_token()
-        if not expected:
+        tokens = await mcp_config.valid_tokens()
+        if not tokens:
             return JSONResponse({"error": "MCP deaktiviert — Token in den Einstellungen generieren."}, status_code=503)
         provided = request.headers.get("x-curastro-token")
         if not provided:
             auth_h = request.headers.get("authorization", "")
             if auth_h.startswith("Bearer "):
                 provided = auth_h[7:]
-        if provided != expected:
+        if provided not in tokens:
             return JSONResponse({"error": "unauthorized"}, status_code=401)
     return await call_next(request)
 

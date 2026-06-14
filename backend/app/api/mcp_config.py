@@ -22,12 +22,18 @@ HEADER_NAME = "x-curastro-token"
 MCP_PATH = "/mcp/"
 
 
-async def get_effective_token() -> str | None:
-    """Aktuell gültiger MCP-Token (DB-User vor ENV). Vom Middleware genutzt."""
+async def valid_tokens() -> set[str]:
+    """Alle gültigen MCP-Tokens: jeder User-Token (Single-User, aber OIDC legt
+    einen separaten User an) plus optional der ENV-Token. Vom Middleware genutzt."""
+    out: set[str] = set()
     async with async_session() as db:
-        u = await db.scalar(select(User).order_by(User.created_at))
-        token = (u.settings or {}).get("mcp_token") if u else None
-    return token or (settings.mcp_token or None)
+        for u in await db.scalars(select(User)):
+            t = (u.settings or {}).get("mcp_token")
+            if t:
+                out.add(t)
+    if settings.mcp_token:
+        out.add(settings.mcp_token)
+    return out
 
 
 def _view(token: str | None) -> dict:
