@@ -165,9 +165,52 @@ def compute_moon(
         "max_altitude": round(max_alt, 1),
         "up": max_alt > 0,
         "track": [round(float(x), 1) for x in alt],
+        "best_window": _best_night_window(grid_local, [float(x) for x in alt]),
         "ra_deg": float(moon_mid.ra.deg),
         "dec_deg": float(moon_mid.dec.deg),
     }
+
+
+def _best_night_window(grid_local, alt) -> dict | None:
+    """Generisch-pauschal bestes Beobachtungsfenster der Nacht — primär nach
+    Dunkelheit: längster mondfreier Abschnitt; sonst um das Mond-Minimum bzw.
+    die dunkle Nachtmitte. Rückgabe {start, end, reason} (HH:MM) oder None."""
+    n = len(alt)
+    if n < 2:
+        return None
+
+    def hhmm(i: int) -> str:
+        return grid_local[i].strftime("%H:%M")
+
+    down = [a <= 0 for a in alt]
+    # Längster zusammenhängender mondfreier Lauf.
+    best = None  # (laenge, start, end)
+    i = 0
+    while i < n:
+        if down[i]:
+            j = i
+            while j + 1 < n and down[j + 1]:
+                j += 1
+            if best is None or (j - i) > best[0]:
+                best = (j - i, i, j)
+            i = j + 1
+        else:
+            i += 1
+
+    # Mondfreier Abschnitt vorhanden, aber nicht (fast) die ganze Nacht.
+    if best is not None and best[0] >= 1 and best[0] < n * 0.9:
+        return {"start": hhmm(best[1]), "end": hhmm(best[2]), "reason": "mondfrei"}
+    # Mond die ganze Nacht über Horizont → Fenster um sein Minimum.
+    if not any(down):
+        k = min(range(n), key=lambda x: alt[x])
+        s, e = max(0, k - 3), min(n - 1, k + 3)
+        if e > s:
+            return {"start": hhmm(s), "end": hhmm(e), "reason": "Mond am tiefsten"}
+    # Sonst (mondfrei ~ganze Nacht / Neumond) → dunkle Nachtmitte.
+    s, e = max(0, round(n * 0.25)), min(n - 1, round(n * 0.75))
+    if e <= s:
+        return None
+    return {"start": hhmm(s), "end": hhmm(e), "reason": "dunkle Nachtmitte"}
 
 
 def _moon_phase_name(illum: float, waxing: bool) -> str:

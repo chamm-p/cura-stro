@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Stars, CloudMoon, ListChecks, Cloud, Moon, Images } from 'lucide-react'
+import { Stars, CloudMoon, ListChecks, Cloud, Moon, Images, Clock, AlertTriangle } from 'lucide-react'
 import { useAuthStore } from '../store/auth'
 import api from '../services/api'
 import Layout from '../components/Layout'
@@ -13,8 +13,12 @@ const VERDICT_STYLE: Record<string, string> = {
 interface Conditions {
   available: boolean
   location?: { name: string }
-  moon?: { illumination_pct: number; phase_name: string; up: boolean }
+  moon?: { illumination_pct: number; phase_name: string; up: boolean; best_window?: { start: string; end: string; reason: string } | null }
   weather?: { available: boolean; cloud_cover?: number; verdict?: string; verdict_text?: string }
+}
+
+const WINDOW_REASON: Record<string, string> = {
+  mondfrei: 'mondfrei', 'Mond am tiefsten': 'Mond am tiefsten', 'dunkle Nachtmitte': 'dunkle Nachtmitte',
 }
 
 export default function Dashboard() {
@@ -90,10 +94,27 @@ function ConditionsCard() {
               <span className="text-slate-500">keine Wetterdaten</span>
             )}
           </div>
-          <div className="flex items-center gap-2 text-slate-300">
-            <Moon className="h-4 w-4 text-slate-400" />
-            {c.moon?.phase_name} · {c.moon?.illumination_pct}% {c.moon?.up ? '' : '(unter Horizont)'}
-          </div>
+          {(() => {
+            const unfav = !!c.moon?.up && (c.moon?.illumination_pct ?? 0) > 70
+            return (
+              <div className={`flex items-center gap-2 ${unfav ? 'text-amber-300' : 'text-slate-300'}`}>
+                <Moon className={`h-4 w-4 ${unfav ? 'text-amber-300' : 'text-slate-400'}`} />
+                {c.moon?.phase_name} · {c.moon?.illumination_pct}% {c.moon?.up ? '' : '(unter Horizont)'}
+                {unfav && (
+                  <span className="flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] text-amber-200">
+                    <AlertTriangle className="h-3 w-3" /> ungünstig
+                  </span>
+                )}
+              </div>
+            )
+          })()}
+          {c.moon?.best_window && (
+            <div className="flex items-center gap-2 text-slate-300">
+              <Clock className="h-4 w-4 text-slate-400" />
+              Beste Bedingungen: <span className="font-medium text-slate-200">{c.moon.best_window.start}–{c.moon.best_window.end}</span>
+              <span className="text-xs text-slate-500">({WINDOW_REASON[c.moon.best_window.reason] || c.moon.best_window.reason})</span>
+            </div>
+          )}
           <p className="pt-1 text-xs text-slate-500">{c.location?.name} · heute Nacht</p>
         </div>
       )}

@@ -114,7 +114,10 @@ async def conditions(
         "date": date,
         "night_start": night_start,
         "night_end": night_end,
-        "moon": {"illumination_pct": moon["illumination_pct"], "phase_name": moon["phase_name"], "up": moon["up"]},
+        "moon": {
+            "illumination_pct": moon["illumination_pct"], "phase_name": moon["phase_name"],
+            "up": moon["up"], "best_window": moon.get("best_window"),
+        },
         "weather": wx,
     }
 
