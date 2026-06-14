@@ -1,17 +1,15 @@
-"""Filing-Core (V2 Phase B) — Subs ins NAS-Archiv einsortieren.
+"""Filing-Core (V2 Phase B) — Subs ins Archiv einsortieren.
 
-Gemeinsame Logik für beide Importwege (Browser-Drag&Drop und ASIAir-SMB):
-parst den ASIAir-Dateinamen, legt die Datei unter
-``<root>/RAW/<Objekt>/<Gerät>/`` ab, schreibt einen ``SubFrame``-Datensatz
-(Dublettenschutz) und aggregiert alles unter der *einen* Observation. Der
-Status wandert dabei von ``geplant`` auf ``raw`` (``entwickelt`` bleibt).
+Schreibt über eine Speicher-Abstraktion (lokal ODER NAS-SMB, siehe
+services/storage.py): parst den ASIAir-Dateinamen, legt die Datei unter
+``RAW/<Objekt>/<Gerät>/`` ab, schreibt einen ``SubFrame`` (Dublettenschutz)
+und aggregiert alles unter der *einen* Observation. Status: geplant → raw
+(entwickelt bleibt).
 """
 
 from __future__ import annotations
 
-import shutil
-from pathlib import Path
-from typing import Awaitable, Callable
+import asyncio
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,17 +21,37 @@ from app.models.observing import Telescope
 from app.models.subframe import SubFrame
 from app.models.user import User
 from app.services import asiair as asi
+from app.services.storage import LocalStorage, SmbStorage, Storage
 
 _cfg = get_settings()
 
 
+# ─── Konfiguration / Speicher-Backend ───
+def archive_config(user: User) -> dict:
+    """Archiv-Konfig aus user.settings['archive'] (Default: lokal)."""
+    a = dict((user.settings or {}).get("archive") or {})
+    return {
+        "mode": a.get("mode") or "local",
+        "root": a.get("root") or _cfg.archive_root,
+        "nas": dict(a.get("nas") or {}),
+    }
+
+
+def get_storage(user: User, override: dict | None = None) -> Storage:
+    cfg = override or archive_config(user)
+    if cfg.get("mode") == "smb":
+        nas = cfg.get("nas") or {}
+        return SmbStorage(nas.get("host"), nas.get("share"), nas.get("path"),
+                          nas.get("username"), nas.get("password"))
+    return LocalStorage(cfg.get("root"))
+
+
 def effective_archive_root(user: User) -> str:
-    """Archiv-Wurzel: Nutzer-Override aus Settings, sonst config/ENV."""
-    return (user.settings or {}).get("archive_root") or _cfg.archive_root
+    return get_storage(user).display_root()
 
 
+# ─── Pfad-/Label-Logik ───
 async def object_label(db: AsyncSession, obs: Observation) -> str:
-    """Ordnername für das Objekt: Katalog-Ident (z. B. „M11") oder Freitext."""
     if obs.catalog_object_id:
         obj = await db.get(CatalogObject, obs.catalog_object_id)
         if obj and obj.ident:
@@ -42,7 +60,6 @@ async def object_label(db: AsyncSession, obs: Observation) -> str:
 
 
 async def device_label(db: AsyncSession, obs: Observation) -> str:
-    """Ordnername für das Gerät: Teleskopname (= dein <Gerät>-Ordner)."""
     if obs.telescope_id:
         scope = await db.get(Telescope, obs.telescope_id)
         if scope and scope.name:
@@ -50,11 +67,10 @@ async def device_label(db: AsyncSession, obs: Observation) -> str:
     return "Unbekannt"
 
 
-async def target_dir(db: AsyncSession, user: User, obs: Observation, kind: str = "RAW") -> Path:
-    root = effective_archive_root(user)
-    obj = await object_label(db, obs)
-    dev = await device_label(db, obs)
-    return Path(str(asi.archive_dir(root, kind, obj, dev)))
+def reldir(kind: str, obj_label: str, dev_label: str) -> str:
+    if kind not in ("RAW", "Developer"):
+        raise ValueError(f"Ungültige Archiv-Art: {kind!r}")
+    return f"{kind}/{asi.safe_component(obj_label)}/{asi.safe_component(dev_label)}"
 
 
 async def _existing_filenames(db: AsyncSession, obs: Observation) -> set[str]:
@@ -65,90 +81,75 @@ async def _existing_filenames(db: AsyncSession, obs: Observation) -> set[str]:
 
 
 def _bump_status(obs: Observation) -> None:
-    """Geplant → raw, sobald Subs da sind. „entwickelt" bleibt unangetastet."""
     if obs.status != "entwickelt":
         obs.status = "raw"
     obs.is_new = False
 
 
-async def file_one(
+# ─── Import ───
+async def import_files(
     db: AsyncSession,
     user: User,
     obs: Observation,
-    filename: str,
-    writer: Callable[[Path], Awaitable[int]],
+    items: list[tuple[str, str]],
     *,
     source: str,
-    dest: Path | None = None,
-    known: set[str] | None = None,
+    kind: str = "RAW",
 ) -> dict:
-    """Eine Datei ablegen + ``SubFrame`` schreiben. ``writer`` erhält den
-    Zielpfad und gibt die geschriebene Größe zurück. Liefert ein Status-Dict
-    (``filed`` | ``duplicate``)."""
-    safe_name = Path(filename).name
-    if known is not None and safe_name in known:
-        return {"file": safe_name, "status": "duplicate"}
-
-    parsed = asi.parse_frame_filename(safe_name)
-    if dest is None:
-        dest = await target_dir(db, user, obs, "RAW")
-    dest.mkdir(parents=True, exist_ok=True)
-    out_path = dest / safe_name
-
-    size = await writer(out_path)
-    verified = out_path.exists() and size > 0
-
-    sub = SubFrame(
-        user_id=user.id,
-        observation_id=obs.id,
-        frame_type=(parsed.frame_type if parsed else "Light"),
-        filter_name=(parsed.filter_name if parsed else None),
-        exposure_s=(parsed.exposure_s if parsed else None),
-        binning=(parsed.binning if parsed else None),
-        captured_at=(parsed.captured_at if parsed else None),
-        sequence=(parsed.sequence if parsed else None),
-        original_filename=safe_name,
-        archive_path=str(out_path),
-        file_size=size,
-        source=source,
-        verified=verified,
-    )
-    db.add(sub)
-    if known is not None:
-        known.add(safe_name)
-    return {"file": safe_name, "status": "filed", "parsed": parsed is not None,
-            "filter": parsed.filter_name if parsed else None}
-
-
-async def import_streams(
-    db: AsyncSession,
-    user: User,
-    obs: Observation,
-    items: list[tuple[str, Callable[[Path], Awaitable[int]]]],
-    *,
-    source: str,
-) -> dict:
-    """Mehrere Dateien einsortieren. ``items`` = Liste (Dateiname, writer)."""
+    """``items`` = Liste (Originalname, lokaler Temp-Pfad). Legt jede Datei via
+    Storage ab und schreibt die SubFrame-Zeilen."""
+    storage = get_storage(user)
+    obj = await object_label(db, obs)
+    dev = await device_label(db, obs)
+    base = reldir(kind, obj, dev)
     known = await _existing_filenames(db, obs)
-    dest = await target_dir(db, user, obs, "RAW")
     results = []
-    for name, writer in items:
-        results.append(await file_one(db, user, obs, name, writer, source=source, dest=dest, known=known))
-    filed = [r for r in results if r["status"] == "filed"]
+    filed = 0
+
+    for name, temp_path in items:
+        from pathlib import PurePosixPath
+        safe = PurePosixPath(name.replace("\\", "/")).name
+        if safe in known:
+            results.append({"file": safe, "status": "duplicate"})
+            continue
+        parsed = asi.parse_frame_filename(safe)
+        rel = f"{base}/{safe}"
+        try:
+            size = await asyncio.to_thread(storage.put, rel, temp_path)
+        except Exception as e:  # noqa: BLE001
+            results.append({"file": safe, "status": "error", "error": str(e)})
+            continue
+        verified = size > 0
+        db.add(SubFrame(
+            user_id=user.id, observation_id=obs.id,
+            frame_type=(parsed.frame_type if parsed else "Light"),
+            filter_name=(parsed.filter_name if parsed else None),
+            exposure_s=(parsed.exposure_s if parsed else None),
+            binning=(parsed.binning if parsed else None),
+            captured_at=(parsed.captured_at if parsed else None),
+            sequence=(parsed.sequence if parsed else None),
+            original_filename=safe, archive_path=storage.full_path(rel),
+            file_size=size, source=source, verified=verified,
+        ))
+        known.add(safe)
+        filed += 1
+        results.append({"file": safe, "status": "filed",
+                        "filter": parsed.filter_name if parsed else None})
+
     if filed:
         _bump_status(obs)
     await db.flush()
     return {
-        "filed": len(filed),
+        "filed": filed,
         "duplicates": sum(1 for r in results if r["status"] == "duplicate"),
+        "errors": sum(1 for r in results if r["status"] == "error"),
         "results": results,
-        "dest": str(dest),
+        "dest": storage.full_path(base),
         "summary": await summary(db, obs),
     }
 
 
 async def summary(db: AsyncSession, obs: Observation) -> dict:
-    """Aggregat über alle Subs der Aufnahme (pro Filter)."""
     rows = await db.scalars(select(SubFrame).where(SubFrame.observation_id == obs.id))
     subs = list(rows)
     agg = asi.aggregate_frames([
@@ -158,22 +159,16 @@ async def summary(db: AsyncSession, obs: Observation) -> dict:
     return {**agg, "nights": nights, "verified": sum(1 for s in subs if s.verified)}
 
 
-# ─── Writer-Fabriken ───
-def streaming_writer(upload, chunk_size: int = 1024 * 1024) -> Callable[[Path], Awaitable[int]]:
-    """Writer für FastAPI-UploadFile: streamt auf Platte (kein Voll-RAM)."""
-    async def _write(out_path: Path) -> int:
-        size = 0
-        with open(out_path, "wb") as f:
-            while chunk := await upload.read(chunk_size):
-                f.write(chunk)
-                size += len(chunk)
-        return size
-    return _write
-
-
-def copyfile_writer(src_path: str) -> Callable[[Path], Awaitable[int]]:
-    """Writer, der eine vorhandene Datei (z. B. SMB-temp) ans Ziel kopiert."""
-    async def _write(out_path: Path) -> int:
-        shutil.copyfile(src_path, out_path)
-        return out_path.stat().st_size
-    return _write
+async def delete_subframe_file(user: User, archive_path: str | None, rel: str | None = None) -> None:
+    """Best-effort: Datei im aktuellen Storage entfernen (für Subframe-Delete)."""
+    if not archive_path and not rel:
+        return
+    storage = get_storage(user)
+    try:
+        if rel:
+            await asyncio.to_thread(storage.delete, rel)
+        elif isinstance(storage, LocalStorage) and archive_path:
+            from pathlib import Path
+            await asyncio.to_thread(lambda: Path(archive_path).unlink(missing_ok=True))
+    except Exception:  # noqa: BLE001
+        pass

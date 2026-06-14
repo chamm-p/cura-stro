@@ -427,23 +427,53 @@ function GeneralTab() {
 }
 
 // ─── Archiv & ASIAir ───
+interface ArchConfig {
+  mode: 'local' | 'smb'; root: string
+  nas: { host: string; share: string; path: string; username: string; password_set: boolean }
+}
 function ArchiveTab() {
-  const [root, setRoot] = useState('')
-  const [savedRoot, setSavedRoot] = useState(false)
+  const [cfg, setCfg] = useState<ArchConfig | null>(null)
+  const [pw, setPw] = useState('')            // nur senden, wenn ausgefüllt
+  const [saved, setSaved] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null)
+  const [reloadKey, setReloadKey] = useState(0)
   const [rigs, setRigs] = useState<Rig[]>([])
   const [scopes, setScopes] = useState<Scope[]>([])
   const [form, setForm] = useState<{ name: string; host: string; telescope_id: string }>({ name: '', host: '', telescope_id: '' })
 
   const loadRigs = () => api.get('/api/asiair/rigs').then((r) => setRigs(r.data))
   useEffect(() => {
-    api.get('/api/settings').then((r) => setRoot(r.data.archive_root || ''))
+    api.get('/api/archive/config').then((r) => setCfg(r.data))
     api.get('/api/equipment/telescopes').then((r) => setScopes(r.data))
     loadRigs()
   }, [])
 
-  const saveRoot = async () => {
-    await api.patch('/api/settings', { archive_root: root })
-    setSavedRoot(true); setTimeout(() => setSavedRoot(false), 1500)
+  const setNas = (k: string, v: string) => setCfg((c) => c && ({ ...c, nas: { ...c.nas, [k]: v } }))
+
+  const payload = () => ({
+    mode: cfg!.mode,
+    root: cfg!.root,
+    nas: {
+      host: cfg!.nas.host, share: cfg!.nas.share, path: cfg!.nas.path,
+      username: cfg!.nas.username, ...(pw ? { password: pw } : {}),
+    },
+  })
+
+  const save = async () => {
+    const r = await api.put('/api/archive/config', payload())
+    setCfg(r.data); setPw(''); setSaved(true); setTimeout(() => setSaved(false), 1500)
+    setReloadKey((k) => k + 1)
+  }
+  const test = async () => {
+    setTesting(true); setTestResult(null)
+    try {
+      const r = await api.post('/api/archive/test', payload())
+      const st = r.data.status
+      setTestResult({ ok: r.data.ok, msg: r.data.ok ? 'Verbindung & Schreibtest OK.' : (st?.error || 'Nicht beschreibbar.') })
+    } catch (e: any) {
+      setTestResult({ ok: false, msg: e.response?.data?.detail || 'Test fehlgeschlagen.' })
+    } finally { setTesting(false) }
   }
 
   const addRig = async () => {
@@ -456,27 +486,60 @@ function ArchiveTab() {
     setForm({ name: '', host: '', telescope_id: '' }); loadRigs()
   }
 
+  if (!cfg) return <Loader2 className="h-5 w-5 animate-spin text-slate-400" />
+
   return (
     <div className="space-y-6">
       {/* Mount-Status */}
-      <MountStatus root={root} />
+      <MountStatus reloadKey={reloadKey} />
 
-      {/* Archiv-Wurzel */}
+      {/* Archiv-Backend */}
       <div className={`${card} max-w-2xl`}>
-        <h3 className="mb-1 flex items-center gap-2 font-semibold"><HardDrive className="h-4.5 w-4.5 text-indigo-300" /> Archiv-Wurzel</h3>
+        <h3 className="mb-1 flex items-center gap-2 font-semibold"><HardDrive className="h-4.5 w-4.5 text-indigo-300" /> Archiv-Speicher</h3>
         <p className="mb-3 text-sm text-slate-400">
-          Verzeichnis im Container, unter dem die Subs landen:
-          <span className="font-mono text-slate-300"> {(root || '/archive')}/RAW/&lt;Objekt&gt;/&lt;Gerät&gt;/</span> und
-          <span className="font-mono text-slate-300"> …/Developer/&lt;Objekt&gt;/&lt;Gerät&gt;/</span>.
+          Wohin Subs &amp; Ergebnisse geschrieben werden — <span className="font-mono">RAW/&lt;Objekt&gt;/&lt;Gerät&gt;/</span> und <span className="font-mono">Developer/…</span>.
         </p>
-        <div className="flex items-center gap-2">
-          <input className={`${inputCls} font-mono`} placeholder="/archive" value={root} onChange={(e) => setRoot(e.target.value)} />
-          <button onClick={saveRoot} className={btnPrimary}><Save className="h-4 w-4" /> {savedRoot ? '✓' : 'Speichern'}</button>
+
+        {/* Modus-Umschalter */}
+        <div className="mb-4 inline-flex rounded-lg border border-white/10 p-0.5">
+          {(['local', 'smb'] as const).map((m) => (
+            <button key={m} onClick={() => setCfg({ ...cfg, mode: m })}
+              className={`rounded-md px-3 py-1.5 text-sm transition ${cfg.mode === m ? 'bg-indigo-500/30 text-white' : 'text-slate-400 hover:text-slate-200'}`}>
+              {m === 'local' ? 'Lokales Volume' : 'NAS (SMB)'}
+            </button>
+          ))}
         </div>
-        <p className="mt-2 text-[11px] text-slate-500">
-          Das ist der <strong>Container</strong>-Pfad. Die NAS wird per <span className="font-mono">ARCHIVE_PATH</span> in der
-          <span className="font-mono"> deploy/.env</span> auf <span className="font-mono">/archive</span> gemountet — der Wert hier muss dazu passen (Default <span className="font-mono">/archive</span>).
-        </p>
+
+        {cfg.mode === 'local' ? (
+          <Field label="Container-Pfad">
+            <input className={`${inputCls} font-mono`} placeholder="/archive" value={cfg.root} onChange={(e) => setCfg({ ...cfg, root: e.target.value })} />
+          </Field>
+        ) : (
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <Field label="NAS-Host / IP"><input className={inputCls} placeholder="192.168.0.5" value={cfg.nas.host} onChange={(e) => setNas('host', e.target.value)} /></Field>
+            <Field label="Freigabe (Share)"><input className={inputCls} placeholder="Fotos" value={cfg.nas.share} onChange={(e) => setNas('share', e.target.value)} /></Field>
+            <Field label="Unterordner (optional)"><input className={inputCls} placeholder="Astrofotos" value={cfg.nas.path} onChange={(e) => setNas('path', e.target.value)} /></Field>
+            <Field label="Benutzer"><input className={inputCls} placeholder="chamm" value={cfg.nas.username} onChange={(e) => setNas('username', e.target.value)} /></Field>
+            <Field label="Passwort">
+              <input type="password" className={inputCls} placeholder={cfg.nas.password_set ? '•••••• (gespeichert — leer = behalten)' : 'Passwort'} value={pw} onChange={(e) => setPw(e.target.value)} />
+            </Field>
+          </div>
+        )}
+
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <button onClick={save} className={btnPrimary}><Save className="h-4 w-4" /> {saved ? 'Gespeichert ✓' : 'Speichern'}</button>
+          <button onClick={test} disabled={testing} className={btnGhost}>
+            {testing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} Verbindung testen
+          </button>
+          {testResult && (
+            <span className={`flex items-center gap-1 text-sm ${testResult.ok ? 'text-emerald-300' : 'text-red-300'}`}>
+              {testResult.ok ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />} {testResult.msg}
+            </span>
+          )}
+        </div>
+        {cfg.mode === 'smb' && (
+          <p className="mt-2 text-[11px] text-slate-500">SMB2/3 wird automatisch ausgehandelt — kein OS-Mount, kein <span className="font-mono">vers=</span>. Tipp: erst „Speichern", dann „Verbindung testen" (Test nutzt sonst nur das eingegebene Passwort).</p>
+        )}
       </div>
 
       {/* ASIAir-Rigs */}
@@ -506,7 +569,7 @@ function ArchiveTab() {
 }
 
 interface ArchStatus {
-  root: string; exists: boolean; writable: boolean; mountpoint?: string | null
+  mode?: string; root: string | null; exists: boolean; writable: boolean; mountpoint?: string | null
   fstype?: string | null; is_network: boolean; total_bytes?: number | null
   free_bytes?: number | null; raw_exists: boolean; developer_exists: boolean; error?: string | null
 }
@@ -516,12 +579,12 @@ function fmtGB(b?: number | null) {
   return gb >= 1024 ? `${(gb / 1024).toFixed(1)} TB` : `${gb.toFixed(1)} GB`
 }
 
-function MountStatus({ root }: { root: string }) {
+function MountStatus({ reloadKey }: { reloadKey: number }) {
   const [s, setS] = useState<ArchStatus | null>(null)
   const [busy, setBusy] = useState(false)
   const load = () => { setBusy(true); api.get('/api/archive/status').then((r) => setS(r.data)).finally(() => setBusy(false)) }
-  // Bei Tab-Aufruf und nach Root-Änderung neu prüfen.
-  useEffect(() => { load() }, [root])
+  // Bei Tab-Aufruf und nach Speichern neu prüfen.
+  useEffect(() => { load() }, [reloadKey])
 
   // Ampel: rot = nicht beschreibbar, grün = NAS (cifs), gelb = lokales Volume.
   const tone = !s ? 'slate'
@@ -566,9 +629,8 @@ function MountStatus({ root }: { root: string }) {
           </div>
           {tone === 'amber' && (
             <p className="mt-3 text-[11px] text-slate-500">
-              Daten liegen in einem lokalen Docker-Volume — <strong>nicht</strong> auf dem NAS. Für den NAS in
-              <span className="font-mono"> deploy/.env</span> das Overlay aktivieren
-              (<span className="font-mono">COMPOSE_FILE=docker-compose.yml:docker-compose.nas.yml</span>) + <span className="font-mono">NAS_*</span> setzen.
+              Daten liegen in einem lokalen Docker-Volume — <strong>nicht</strong> auf dem NAS. Für den NAS unten auf
+              <strong> „NAS (SMB)"</strong> umstellen und Zugangsdaten eintragen.
             </p>
           )}
           {s.error && <p className="mt-2 text-[11px] text-red-300">{s.error}</p>}

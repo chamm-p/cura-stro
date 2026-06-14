@@ -29,3 +29,6 @@ python-multipart==0.0.20  # Datei-Uploads (FastAPI)
 
 # ─── MCP-Server (Phase 8) ───
 mcp>=1.9.0,<2.0.0     # Streamable-HTTP-Server für externe LLMs (curai)
+
+# ─── NAS-/ASIAir-Zugriff per SMB (V2) ───
+smbprotocol==1.15.0   # SMB2/3-Client (NAS-Archiv + ASIAir-Import), kein OS-Mount
