@@ -33,10 +33,15 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-curastro}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-curastro}
       SEEING_SCRAPER_URL: http://weather-scraper:8090
+      ARCHIVE_ROOT: ${ARCHIVE_ROOT:-/archive}
     ports:
       - "${BACKEND_PORT:-9605}:8000"
     volumes:
       - outputs:/app/outputs
+      # Foto-Archiv (RAW/Developer) unter /archive. Standard: CIFS-Volume
+      # archivedata (NAS, Zugangsdaten via NAS_* in .env). Alternativ einen
+      # Host-Pfad als Bind erzwingen mit ARCHIVE_PATH=/mnt/...
+      - ${ARCHIVE_PATH:-archivedata}:/archive
     depends_on:
       db: { condition: service_healthy }
     networks: [curastro-net]
@@ -73,6 +78,17 @@ services:
 volumes:
   pgdata:
   outputs:
+  # NAS-Foto-Archiv per SMB/CIFS. Greift nur, wenn ARCHIVE_PATH NICHT gesetzt
+  # ist (sonst Bind). Zugangsdaten + Pfad kommen aus deploy/.env (NAS_*).
+  # Eingehängt wird direkt //<NAS_HOST>/<NAS_PATH> (z. B. Fotos/Astrofotos),
+  # sodass /archive isoliert auf den Astrofoto-Ordner zeigt. uid/gid 1000 =
+  # Container-User appuser (Schreibrecht). vers=3.0 für Synology/SMB3.
+  archivedata:
+    driver: local
+    driver_opts:
+      type: cifs
+      device: "//${NAS_HOST:-}/${NAS_PATH:-}"
+      o: "username=${NAS_USER:-},password=${NAS_PASSWORD:-},uid=1000,gid=1000,vers=3.0,file_mode=0775,dir_mode=0775"
 
 networks:
   curastro-net:

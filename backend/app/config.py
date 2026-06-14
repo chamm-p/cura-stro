@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     debug: bool = False
     public_base_url: str = Field(default="http://localhost:9601")
     outputs_dir: str = Field(default="/app/outputs")
+    # Wurzel des verwalteten Foto-Archivs (NAS, in den Container gemountet).
+    # Darunter entstehen RAW/<Objekt>/<Gerät>/ und Developer/<Objekt>/<Gerät>/.
+    # In Settings pro Nutzer überschreibbar (V2-Foto-Workflow).
+    archive_root: str = Field(default="/archive")
 
     # ─── Datenbank ───
     database_url: str | None = Field(default=None)

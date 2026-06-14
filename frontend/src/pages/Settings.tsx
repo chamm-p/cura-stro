@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import {
   MapPin, Crosshair, Search, Trash2, Plus, Star, Telescope, Camera as CamIcon,
   Filter as FilterIcon, Loader2, Save, Pencil, Server, Copy, RefreshCw, Check,
+  HardDrive, Radio,
 } from 'lucide-react'
 import api from '../services/api'
 import Layout from '../components/Layout'
@@ -16,7 +17,8 @@ interface Scope { id: string; name: string; aperture_mm?: number | null; focal_l
 interface Cam { id: string; name: string; pixel_size_um?: number | null; res_x?: number | null; res_y?: number | null; sensor_type: string }
 interface Filt { id: string; name: string; kind: string; bandwidth_nm?: number | null }
 interface SetupT { id: string; name: string; telescope_id: string; camera_id: string; telescope_name: string; camera_name: string; filters: { id: string; name: string; kind: string }[] }
-interface AppSettings { night_start: string; night_end: string; default_location_id?: string | null }
+interface AppSettings { night_start: string; night_end: string; default_location_id?: string | null; archive_root?: string }
+interface Rig { id: string; name: string; host?: string | null; share?: string | null; telescope_id?: string | null; telescope_name?: string | null }
 
 const inputCls = 'w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white placeholder-slate-500 outline-none focus:border-indigo-400/60 focus:ring-2 focus:ring-indigo-500/20'
 const btnPrimary = 'flex items-center justify-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3.5 py-2 text-sm font-medium text-white transition hover:from-indigo-400 hover:to-violet-500 disabled:opacity-40'
@@ -26,6 +28,7 @@ const card = 'rounded-2xl border border-white/10 bg-[#0c1024] p-5'
 const TABS = [
   { id: 'locations', label: 'Standorte', icon: MapPin },
   { id: 'equipment', label: 'Equipment', icon: Telescope },
+  { id: 'archive', label: 'Archiv & ASIAir', icon: HardDrive },
   { id: 'general', label: 'Allgemein', icon: Star },
   { id: 'mcp', label: 'MCP', icon: Server },
 ] as const
@@ -51,6 +54,7 @@ export default function Settings() {
       <div className="mt-6">
         {tab === 'locations' && <LocationsTab />}
         {tab === 'equipment' && <EquipmentTab />}
+        {tab === 'archive' && <ArchiveTab />}
         {tab === 'general' && <GeneralTab />}
         {tab === 'mcp' && <McpTab />}
       </div>
@@ -418,6 +422,111 @@ function GeneralTab() {
         </select>
       </Field>
       <button onClick={save} className={btnPrimary}><Save className="h-4 w-4" /> {saved ? 'Gespeichert ✓' : 'Speichern'}</button>
+    </div>
+  )
+}
+
+// ─── Archiv & ASIAir ───
+function ArchiveTab() {
+  const [root, setRoot] = useState('')
+  const [savedRoot, setSavedRoot] = useState(false)
+  const [rigs, setRigs] = useState<Rig[]>([])
+  const [scopes, setScopes] = useState<Scope[]>([])
+  const [form, setForm] = useState<{ name: string; host: string; telescope_id: string }>({ name: '', host: '', telescope_id: '' })
+
+  const loadRigs = () => api.get('/api/asiair/rigs').then((r) => setRigs(r.data))
+  useEffect(() => {
+    api.get('/api/settings').then((r) => setRoot(r.data.archive_root || ''))
+    api.get('/api/equipment/telescopes').then((r) => setScopes(r.data))
+    loadRigs()
+  }, [])
+
+  const saveRoot = async () => {
+    await api.patch('/api/settings', { archive_root: root })
+    setSavedRoot(true); setTimeout(() => setSavedRoot(false), 1500)
+  }
+
+  const addRig = async () => {
+    if (!form.name) return
+    await api.post('/api/asiair/rigs', {
+      name: form.name,
+      host: form.host || null,
+      telescope_id: form.telescope_id || null,
+    })
+    setForm({ name: '', host: '', telescope_id: '' }); loadRigs()
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Archiv-Wurzel */}
+      <div className={`${card} max-w-2xl`}>
+        <h3 className="mb-1 flex items-center gap-2 font-semibold"><HardDrive className="h-4.5 w-4.5 text-indigo-300" /> Archiv-Wurzel</h3>
+        <p className="mb-3 text-sm text-slate-400">
+          Verzeichnis im Container, unter dem die Subs landen:
+          <span className="font-mono text-slate-300"> {(root || '/archive')}/RAW/&lt;Objekt&gt;/&lt;Gerät&gt;/</span> und
+          <span className="font-mono text-slate-300"> …/Developer/&lt;Objekt&gt;/&lt;Gerät&gt;/</span>.
+        </p>
+        <div className="flex items-center gap-2">
+          <input className={`${inputCls} font-mono`} placeholder="/archive" value={root} onChange={(e) => setRoot(e.target.value)} />
+          <button onClick={saveRoot} className={btnPrimary}><Save className="h-4 w-4" /> {savedRoot ? '✓' : 'Speichern'}</button>
+        </div>
+        <p className="mt-2 text-[11px] text-slate-500">
+          Das ist der <strong>Container</strong>-Pfad. Die NAS wird per <span className="font-mono">ARCHIVE_PATH</span> in der
+          <span className="font-mono"> deploy/.env</span> auf <span className="font-mono">/archive</span> gemountet — der Wert hier muss dazu passen (Default <span className="font-mono">/archive</span>).
+        </p>
+      </div>
+
+      {/* ASIAir-Rigs */}
+      <div className={card}>
+        <h3 className="mb-1 flex items-center gap-2 font-semibold"><Radio className="h-4.5 w-4.5 text-indigo-300" /> ASIAir-Geräte</h3>
+        <p className="mb-3 text-sm text-slate-400">
+          Eine ASIAir je Teleskop. Das Mapping bestimmt den <span className="font-mono">&lt;Gerät&gt;</span>-Ordner beim Import,
+          da der Dateiname das Teleskop nicht enthält.
+        </p>
+        <div className="space-y-2">
+          {rigs.map((r) => <RigRow key={r.id} r={r} scopes={scopes} reload={loadRigs} />)}
+          {rigs.length === 0 && <p className="text-sm text-slate-500">Noch keine ASIAir hinterlegt.</p>}
+        </div>
+        <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-4">
+          <input className={inputCls} placeholder="Name (z. B. ASIAir ES127)" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+          <input className={inputCls} placeholder="Host/IP (optional)" value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} />
+          <select className={inputCls} value={form.telescope_id} onChange={(e) => setForm({ ...form, telescope_id: e.target.value })}>
+            <option value="">Teleskop …</option>
+            {scopes.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+          <button onClick={addRig} className={btnPrimary}><Plus className="h-4 w-4" /> Hinzufügen</button>
+        </div>
+        <p className="mt-1.5 text-[11px] text-slate-500">Host/IP kann leer bleiben — er wird beim Import (Phase B) per Netzwerk-Suche befüllt. Die ASIAir-Freigabe ist offen (kein Passwort).</p>
+      </div>
+    </div>
+  )
+}
+
+function RigRow({ r, scopes, reload }: { r: Rig; scopes: Scope[]; reload: () => void }) {
+  const [name, setName] = useState(r.name)
+  const [host, setHost] = useState(r.host ?? '')
+
+  const save = async (patch: Partial<Rig>) => {
+    await api.patch(`/api/asiair/rigs/${r.id}`, patch)
+    reload()
+  }
+  const cell = 'rounded border border-white/10 bg-black/30 px-2 py-1 text-xs text-white outline-none focus:border-indigo-400/60'
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-white/10 bg-black/20 px-3 py-2">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400">
+        <input className={`${cell} w-44 font-medium text-white`} value={name} onChange={(e) => setName(e.target.value)} onBlur={() => name !== r.name && save({ name })} />
+        <label className="flex items-center gap-1">Host
+          <input className={`${cell} w-40`} value={host} placeholder="IP/Hostname" onChange={(e) => setHost(e.target.value)} onBlur={() => host !== (r.host ?? '') && save({ host: host || null })} />
+        </label>
+        <label className="flex items-center gap-1">Teleskop
+          <select className={cell} value={r.telescope_id ?? ''} onChange={(e) => save({ telescope_id: e.target.value || null })}>
+            <option value="">— keins —</option>
+            {scopes.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </label>
+      </div>
+      <button onClick={() => api.delete(`/api/asiair/rigs/${r.id}`).then(reload)} className="rounded-lg p-1.5 text-slate-400 hover:bg-red-500/20 hover:text-red-300"><Trash2 className="h-4 w-4" /></button>
     </div>
   )
 }

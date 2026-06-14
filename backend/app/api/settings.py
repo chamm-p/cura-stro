@@ -4,13 +4,20 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.config import get_settings
 from app.database import get_db
 from app.models.user import User
 from app.schemas.observing import SettingsOut, SettingsUpdate
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
-DEFAULTS = {"night_start": "22:00", "night_end": "05:00", "default_location_id": None}
+_cfg = get_settings()
+DEFAULTS = {
+    "night_start": "22:00",
+    "night_end": "05:00",
+    "default_location_id": None,
+    "archive_root": _cfg.archive_root,
+}
 
 
 def _read(user: User) -> SettingsOut:
@@ -19,6 +26,7 @@ def _read(user: User) -> SettingsOut:
         night_start=s.get("night_start") or "22:00",
         night_end=s.get("night_end") or "05:00",
         default_location_id=s.get("default_location_id"),
+        archive_root=s.get("archive_root") or _cfg.archive_root,
     )
 
 

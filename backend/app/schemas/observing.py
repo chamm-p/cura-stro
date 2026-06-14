@@ -122,9 +122,12 @@ class SettingsOut(BaseModel):
     night_start: str = "22:00"
     night_end: str = "05:00"
     default_location_id: str | None = None
+    # Archiv-Wurzel (Containerpfad zur gemounteten NAS) für den Foto-Workflow.
+    archive_root: str = "/archive"
 
 
 class SettingsUpdate(BaseModel):
     night_start: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
     night_end: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
     default_location_id: str | None = None
+    archive_root: str | None = Field(default=None, max_length=500)
