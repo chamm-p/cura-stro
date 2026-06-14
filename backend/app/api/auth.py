@@ -161,6 +161,7 @@ async def oidc_token_exchange(
                 first_name=claims.get("given_name"),
                 last_name=claims.get("family_name"),
                 full_name=claims.get("name"),
+                last_login=datetime.now(timezone.utc),
             )
             db.add(user)
             await db.flush()

@@ -15,6 +15,7 @@ from sqlalchemy import select
 
 from app.database import async_session
 from app.models.catalog import CatalogObject
+from app.models.observing import Location
 from app.models.user import User
 from app.services import object_info as oi
 from app.services import target_service
@@ -35,9 +36,15 @@ mcp = FastMCP(
 
 
 async def _user(db) -> User | None:
-    """Aktiven User wählen: zuletzt eingeloggt zuerst (der OIDC-User hat ein
-    last_login, der Bootstrap-`astro`-User i.d.R. nicht) — so laufen die Tools
-    auf den Daten (Standorte/Equipment) des tatsächlich genutzten Accounts."""
+    """Den tatsächlich genutzten Account wählen: Eigentümer des zuletzt
+    angelegten Standorts (Single-User, aber OIDC legt einen separaten User an,
+    während der Bootstrap-`astro`-User leer bleibt). Fallback: zuletzt
+    eingeloggt, sonst der erste User."""
+    loc = await db.scalar(select(Location).order_by(Location.created_at.desc()))
+    if loc:
+        owner = await db.get(User, loc.user_id)
+        if owner:
+            return owner
     return await db.scalar(select(User).order_by(User.last_login.desc().nullslast(), User.created_at))
 
 
