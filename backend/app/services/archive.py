@@ -115,8 +115,10 @@ async def import_files(
     results = []
     filed = 0
 
-    for name, temp_path in items:
+    for item in items:
         from pathlib import PurePosixPath
+        name, temp_path = item[0], item[1]
+        src_path = item[2] if len(item) > 2 else None
         safe = PurePosixPath(name.replace("\\", "/")).name
         if safe in known:
             results.append({"file": safe, "status": "duplicate"})
@@ -138,7 +140,7 @@ async def import_files(
             captured_at=(parsed.captured_at if parsed else None),
             sequence=(parsed.sequence if parsed else None),
             original_filename=safe, archive_path=storage.full_path(rel),
-            file_size=size, source=source, verified=verified,
+            source_path=src_path, file_size=size, source=source, verified=verified,
         ))
         known.add(safe)
         filed += 1

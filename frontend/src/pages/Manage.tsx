@@ -1,9 +1,10 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
-import { ListChecks, Trash2, Plus, Loader2, Image as ImageIcon, ChevronUp, ChevronDown, StickyNote, X, Layers } from 'lucide-react'
+import { ListChecks, Trash2, Plus, Loader2, Image as ImageIcon, ChevronUp, ChevronDown, StickyNote, X, Layers, Radio } from 'lucide-react'
 import api from '../services/api'
 import Layout from '../components/Layout'
 import ImagesModal from '../components/ImagesModal'
 import SubsModal from '../components/SubsModal'
+import AsiairImportModal from '../components/AsiairImportModal'
 
 interface Obs {
   id: string; catalog_object_id: string | null
@@ -41,6 +42,7 @@ export default function Manage() {
   const [imgFor, setImgFor] = useState<Obs | null>(null)
   const [subsFor, setSubsFor] = useState<Obs | null>(null)
   const [notesFor, setNotesFor] = useState<Obs | null>(null)
+  const [asiairOpen, setAsiairOpen] = useState(false)
   const [sortField, setSortField] = useState<string | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
@@ -107,6 +109,9 @@ export default function Manage() {
           onChange={(e) => setNewLabel(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addManual()} />
         <button onClick={addManual} className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3.5 py-2 text-sm font-medium text-white hover:from-indigo-400 hover:to-violet-500">
           <Plus className="h-4 w-4" /> Planen
+        </button>
+        <button onClick={() => setAsiairOpen(true)} className="flex items-center gap-1.5 rounded-lg border border-white/10 px-3.5 py-2 text-sm text-slate-200 hover:bg-white/10" title="Subs direkt von der ASIAir importieren">
+          <Radio className="h-4 w-4" /> Von ASIAir
         </button>
       </div>
 
@@ -214,6 +219,7 @@ export default function Manage() {
           onChanged={load}
         />
       )}
+      {asiairOpen && <AsiairImportModal onClose={() => setAsiairOpen(false)} onImported={load} />}
       {notesFor && (
         <NotesModal
           obs={notesFor}

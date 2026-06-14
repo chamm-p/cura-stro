@@ -440,7 +440,10 @@ function ArchiveTab() {
   const [reloadKey, setReloadKey] = useState(0)
   const [rigs, setRigs] = useState<Rig[]>([])
   const [scopes, setScopes] = useState<Scope[]>([])
-  const [form, setForm] = useState<{ name: string; host: string; telescope_id: string }>({ name: '', host: '', telescope_id: '' })
+  const [form, setForm] = useState<{ name: string; host: string; share: string; telescope_id: string }>({ name: '', host: '', share: '', telescope_id: '' })
+  const [subnet, setSubnet] = useState('192.168.0.0/24')
+  const [discovering, setDiscovering] = useState(false)
+  const [hosts, setHosts] = useState<string[] | null>(null)
 
   const loadRigs = () => api.get('/api/asiair/rigs').then((r) => setRigs(r.data))
   useEffect(() => {
@@ -483,9 +486,18 @@ function ArchiveTab() {
     await api.post('/api/asiair/rigs', {
       name: form.name,
       host: form.host || null,
+      share: form.share || null,
       telescope_id: form.telescope_id || null,
     })
-    setForm({ name: '', host: '', telescope_id: '' }); loadRigs()
+    setForm({ name: '', host: '', share: '', telescope_id: '' }); loadRigs()
+  }
+
+  const discover = async () => {
+    setDiscovering(true); setHosts(null)
+    try {
+      const r = await api.get('/api/asiair/discover', { params: { subnet } })
+      setHosts(r.data.hosts)
+    } catch { setHosts([]) } finally { setDiscovering(false) }
   }
 
   if (!cfg) return <Loader2 className="h-5 w-5 animate-spin text-slate-400" />
@@ -562,16 +574,32 @@ function ArchiveTab() {
           {rigs.map((r) => <RigRow key={r.id} r={r} scopes={scopes} reload={loadRigs} />)}
           {rigs.length === 0 && <p className="text-sm text-slate-500">Noch keine ASIAir hinterlegt.</p>}
         </div>
-        <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-4">
+        <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-5">
           <input className={inputCls} placeholder="Name (z. B. ASIAir ES127)" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-          <input className={inputCls} placeholder="Host/IP (optional)" value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} />
+          <input className={inputCls} placeholder="Host/IP" value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} />
+          <input className={inputCls} placeholder="Freigabe (z. B. Autorun)" value={form.share} onChange={(e) => setForm({ ...form, share: e.target.value })} />
           <select className={inputCls} value={form.telescope_id} onChange={(e) => setForm({ ...form, telescope_id: e.target.value })}>
             <option value="">Teleskop …</option>
             {scopes.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
           <button onClick={addRig} className={btnPrimary}><Plus className="h-4 w-4" /> Hinzufügen</button>
         </div>
-        <p className="mt-1.5 text-[11px] text-slate-500">Host/IP kann leer bleiben — er wird beim Import (Phase B) per Netzwerk-Suche befüllt. Die ASIAir-Freigabe ist offen (kein Passwort).</p>
+
+        {/* Netzwerk-Suche */}
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <input className={`${inputCls} max-w-[180px]`} value={subnet} onChange={(e) => setSubnet(e.target.value)} placeholder="192.168.0.0/24" />
+          <button onClick={discover} disabled={discovering} className={btnGhost}>
+            {discovering ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />} ASIAirs suchen
+          </button>
+          {hosts && hosts.map((h) => (
+            <button key={h} onClick={() => setForm({ ...form, host: h })}
+              className="rounded-full border border-indigo-400/30 bg-indigo-500/15 px-2.5 py-1 text-xs text-indigo-100 hover:bg-indigo-500/30" title="Als Host übernehmen">
+              {h}
+            </button>
+          ))}
+          {hosts && hosts.length === 0 && <span className="text-xs text-slate-500">nichts gefunden</span>}
+        </div>
+        <p className="mt-1.5 text-[11px] text-slate-500">Eine ASIAir je Teleskop. „Freigabe" = SMB-Share der ASIAir (oft <span className="font-mono">Autorun</span>; siehst du am Mac-Mount). Die Suche listet SMB-Hosts im Subnetz — passenden anklicken füllt den Host.</p>
       </div>
     </div>
   )
@@ -658,6 +686,7 @@ function Badge({ ok, neutralIfFalse, children }: { ok: boolean; neutralIfFalse?:
 function RigRow({ r, scopes, reload }: { r: Rig; scopes: Scope[]; reload: () => void }) {
   const [name, setName] = useState(r.name)
   const [host, setHost] = useState(r.host ?? '')
+  const [share, setShare] = useState(r.share ?? '')
 
   const save = async (patch: Partial<Rig>) => {
     await api.patch(`/api/asiair/rigs/${r.id}`, patch)
@@ -668,9 +697,12 @@ function RigRow({ r, scopes, reload }: { r: Rig; scopes: Scope[]; reload: () => 
   return (
     <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-white/10 bg-black/20 px-3 py-2">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400">
-        <input className={`${cell} w-44 font-medium text-white`} value={name} onChange={(e) => setName(e.target.value)} onBlur={() => name !== r.name && save({ name })} />
+        <input className={`${cell} w-40 font-medium text-white`} value={name} onChange={(e) => setName(e.target.value)} onBlur={() => name !== r.name && save({ name })} />
         <label className="flex items-center gap-1">Host
-          <input className={`${cell} w-40`} value={host} placeholder="IP/Hostname" onChange={(e) => setHost(e.target.value)} onBlur={() => host !== (r.host ?? '') && save({ host: host || null })} />
+          <input className={`${cell} w-36`} value={host} placeholder="IP/Hostname" onChange={(e) => setHost(e.target.value)} onBlur={() => host !== (r.host ?? '') && save({ host: host || null })} />
+        </label>
+        <label className="flex items-center gap-1">Freigabe
+          <input className={`${cell} w-28`} value={share} placeholder="Autorun" onChange={(e) => setShare(e.target.value)} onBlur={() => share !== (r.share ?? '') && save({ share: share || null })} />
         </label>
         <label className="flex items-center gap-1">Teleskop
           <select className={cell} value={r.telescope_id ?? ''} onChange={(e) => save({ telescope_id: e.target.value || null })}>

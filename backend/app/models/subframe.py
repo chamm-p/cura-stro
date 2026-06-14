@@ -57,6 +57,8 @@ class SubFrame(Base):
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     # Zielpfad im Archiv (NAS), sobald abgelegt.
     archive_path: Mapped[str | None] = mapped_column(String(700), nullable=True)
+    # Quellpfad auf der ASIAir (UNC), für sicheres On-Demand-Cleanup.
+    source_path: Mapped[str | None] = mapped_column(String(700), nullable=True)
     file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # Herkunft: "asiair" | "upload".
     source: Mapped[str | None] = mapped_column(String(16), nullable=True)
