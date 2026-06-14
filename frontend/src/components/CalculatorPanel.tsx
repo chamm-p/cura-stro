@@ -76,11 +76,11 @@ export default function CalculatorPanel({
   return (
     <div>
       {setups.length === 0 ? (
-        <div className="rounded-2xl border border-white/10 bg-white/5 p-6 text-sm text-slate-300">
+        <div className="rounded-2xl border border-white/10 bg-[#0c1024] p-6 text-sm text-slate-300">
           Noch kein Setup. Lege unter <Link to="/settings" className="text-indigo-300 hover:underline">Einstellungen → Equipment → Setups</Link> ein Teleskop+Kamera-Bundle an.
         </div>
       ) : (
-        <div className="flex flex-wrap items-end gap-3 rounded-2xl border border-white/10 bg-white/5 p-4">
+        <div className="flex flex-wrap items-end gap-3 rounded-2xl border border-white/10 bg-[#0c1024] p-4">
           <Ctl label="Setup" icon={Layers}>
             <select className={input} value={setupId} onChange={(e) => setSetupId(e.target.value)}>
               {setups.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
@@ -112,7 +112,7 @@ export default function CalculatorPanel({
 
       {data && fr && !loading && (
         <div className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-2">
-          <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
+          <div className="rounded-2xl border border-white/10 bg-[#0c1024] p-5">
             <h3 className="mb-1 flex items-center gap-2 font-semibold"><Crop className="h-4.5 w-4.5 text-indigo-300" /> Bildfeld & Framing</h3>
             <p className="mb-3 text-xs text-slate-400">{data.telescope.name} · {data.telescope.focal_length_mm} mm{data.telescope.focal_ratio ? ` f/${data.telescope.focal_ratio}` : ''} · {data.camera.name}</p>
             <div className="grid grid-cols-2 gap-3 text-sm">
@@ -141,7 +141,7 @@ export default function CalculatorPanel({
             {!fr.object && <p className="mt-4 text-xs text-slate-500">Objekt eingeben (z. B. M31) für die simulierte Framing-Vorschau.</p>}
           </div>
 
-          <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
+          <div className="rounded-2xl border border-white/10 bg-[#0c1024] p-5">
             <h3 className="mb-1 flex items-center gap-2 font-semibold"><Clock className="h-4.5 w-4.5 text-indigo-300" /> Belichtung pro Filter</h3>
             <p className="mb-3 text-xs text-slate-400">Bortle {data.exposure.bortle} (SQM {data.exposure.sqm}) · RN {data.exposure.read_noise} e⁻ · QE {Math.round(data.exposure.qe * 100)}%</p>
             {!data.exposure.aperture_known ? (

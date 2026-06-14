@@ -106,9 +106,9 @@ export default function Manage() {
       ) : rows.length === 0 ? (
         <p className="mt-10 text-sm text-slate-500">Noch keine Aufnahmen. Plane Objekte aus der Objektliste („einplanen") oder oben manuell.</p>
       ) : (
-        <div className="mt-5 overflow-x-auto rounded-2xl border border-white/10">
+        <div className="mt-5 overflow-x-auto rounded-2xl border border-white/10 bg-[#0c1024]">
           <table className="w-full text-sm">
-            <thead className="bg-white/5 text-left text-xs text-slate-400">
+            <thead className="bg-[#0c1024] text-left text-xs text-slate-400">
               <tr>
                 <SortTh label="Objekt" field="object" active={sortField} dir={sortDir} onClick={toggleSort} />
                 <th className="px-3 py-2.5">Typ</th>

@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { useState } from 'react'
 import { Stars, CloudMoon, ListChecks, Cloud, Moon, Images } from 'lucide-react'
 import { useAuthStore } from '../store/auth'
 import api from '../services/api'
@@ -27,7 +26,7 @@ export default function Dashboard() {
     api.get('/api/health').then((r) => setHealth(r.data?.status ?? 'unknown')).catch(() => setHealth('offline'))
   }, [])
 
-  const cls = 'block rounded-2xl border border-white/10 bg-white/5 p-6 transition hover:border-indigo-400/40 hover:bg-white/[0.07]'
+  const cls = 'block rounded-2xl border border-white/10 bg-[#0c1024] p-6 transition hover:border-indigo-400/40 hover:bg-white/[0.07]'
 
   return (
     <Layout>
@@ -69,7 +68,7 @@ function ConditionsCard() {
     api.get('/api/targets/conditions').then((r) => setC(r.data)).catch(() => setC({ available: false }))
   }, [])
 
-  const cls = 'block rounded-2xl border border-white/10 bg-white/5 p-6'
+  const cls = 'block rounded-2xl border border-white/10 bg-[#0c1024] p-6'
 
   return (
     <div className={cls}>

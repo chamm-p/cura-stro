@@ -21,7 +21,7 @@ interface AppSettings { night_start: string; night_end: string; default_location
 const inputCls = 'w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white placeholder-slate-500 outline-none focus:border-indigo-400/60 focus:ring-2 focus:ring-indigo-500/20'
 const btnPrimary = 'flex items-center justify-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3.5 py-2 text-sm font-medium text-white transition hover:from-indigo-400 hover:to-violet-500 disabled:opacity-40'
 const btnGhost = 'flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-2 text-sm text-slate-300 transition hover:bg-white/10'
-const card = 'rounded-2xl border border-white/10 bg-white/5 p-5'
+const card = 'rounded-2xl border border-white/10 bg-[#0c1024] p-5'
 
 const TABS = [
   { id: 'locations', label: 'Standorte', icon: MapPin },
@@ -199,7 +199,7 @@ function LocationsTab() {
         {loading ? <Loader2 className="h-5 w-5 animate-spin text-slate-400" /> : items.length === 0 ? (
           <p className="text-sm text-slate-500">Noch keine Standorte. Lege oben einen an.</p>
         ) : items.map((l) => (
-          <div key={l.id} className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-4 py-3">
+          <div key={l.id} className="flex items-center justify-between rounded-xl border border-white/10 bg-[#0c1024] px-4 py-3">
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <span className="font-medium">{l.name}</span>

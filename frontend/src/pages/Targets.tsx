@@ -113,7 +113,7 @@ export default function Targets() {
       </div>
 
       {/* Steuerung */}
-      <div className="mt-5 flex flex-wrap items-end gap-3 rounded-2xl border border-white/10 bg-white/5 p-4">
+      <div className="mt-5 flex flex-wrap items-end gap-3 rounded-2xl border border-white/10 bg-[#0c1024] p-4">
         <Ctl label="Standort" icon={MapPin}>
           <select className={input} value={locId} onChange={(e) => setLocId(e.target.value)}>
             <option value="">Standard</option>
@@ -231,7 +231,7 @@ function SeeingPanel({ locationId }: { locationId: string }) {
   }
 
   return (
-    <div className="mt-3 rounded-xl border border-white/10 bg-white/5">
+    <div className="mt-3 rounded-xl border border-white/10 bg-[#0c1024]">
       <button onClick={toggle} className="flex w-full items-center justify-between px-4 py-2.5 text-sm text-slate-200">
         <span className="flex items-center gap-2"><Cloud className="h-4 w-4 text-indigo-300" /> meteoblue Seeing</span>
         <span className="text-xs text-slate-500">{open ? 'einklappen' : 'anzeigen'}</span>
@@ -319,8 +319,8 @@ function Card({ t, grid, minAlt, scopeId, onOpenCalc, onOpenInfo }: { t: Target;
   const clickable = t.obj_type !== 'planet'
   const outerProps: any = clickable
     ? { onClick: onOpenCalc, role: 'button', title: 'Framing & Belichtung berechnen',
-        className: 'block cursor-pointer overflow-hidden rounded-2xl border border-white/10 bg-white/5 transition hover:border-indigo-400/40' }
-    : { className: 'block overflow-hidden rounded-2xl border border-white/10 bg-white/5' }
+        className: 'block cursor-pointer overflow-hidden rounded-2xl border border-white/10 bg-[#0c1024] transition hover:border-indigo-400/40' }
+    : { className: 'block overflow-hidden rounded-2xl border border-white/10 bg-[#0c1024]' }
   return (
     <div {...outerProps}>
       <div className="relative aspect-video bg-black">
