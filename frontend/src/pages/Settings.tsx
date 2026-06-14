@@ -308,14 +308,7 @@ function EquipmentTab() {
       <div className={card}>
         <h3 className="mb-3 flex items-center gap-2 font-semibold"><CamIcon className="h-4.5 w-4.5 text-indigo-300" /> Kameras</h3>
         <div className="space-y-2">
-          {cams.map((c) => (
-            <Row key={c.id} onDelete={() => api.delete(`/api/equipment/cameras/${c.id}`).then(loadAll)}>
-              <span className="font-medium">{c.name}</span>
-              <span className="text-xs text-slate-500">
-                {c.sensor_type} · {c.pixel_size_um ? `${c.pixel_size_um} µm` : '— µm'}{c.res_x ? ` · ${c.res_x}×${c.res_y ?? '?'}` : ''}
-              </span>
-            </Row>
-          ))}
+          {cams.map((c) => <CamRow key={c.id} c={c} reload={loadAll} />)}
         </div>
         <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-7">
           <input className={`${inputCls} sm:col-span-2`} placeholder="Name" value={cf.name} onChange={(e) => setCf({ ...cf, name: e.target.value })} />
@@ -557,6 +550,46 @@ function ScopeRow({ s, reload }: { s: Scope; reload: () => void }) {
         {!lim && suggestion && <span className="text-slate-500">(Vorschlag {suggestion})</span>}
       </div>
       <button onClick={() => api.delete(`/api/equipment/telescopes/${s.id}`).then(reload)} className="rounded-lg p-1.5 text-slate-400 hover:bg-red-500/20 hover:text-red-300"><Trash2 className="h-4 w-4" /></button>
+    </div>
+  )
+}
+
+function CamRow({ c, reload }: { c: Cam; reload: () => void }) {
+  const [px, setPx] = useState(c.pixel_size_um?.toString() ?? '')
+  const [rx, setRx] = useState(c.res_x?.toString() ?? '')
+  const [ry, setRy] = useState(c.res_y?.toString() ?? '')
+  const [sensor, setSensor] = useState(c.sensor_type)
+
+  const save = async (sensorOverride?: string) => {
+    await api.patch(`/api/equipment/cameras/${c.id}`, {
+      name: c.name,
+      pixel_size_um: px ? Number(px) : null,
+      res_x: rx ? Number(rx) : null,
+      res_y: ry ? Number(ry) : null,
+      sensor_type: sensorOverride ?? sensor,
+    })
+    reload()
+  }
+  const cell = 'w-20 rounded border border-white/10 bg-black/30 px-2 py-1 text-right text-xs text-white outline-none focus:border-indigo-400/60'
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-white/10 bg-black/20 px-3 py-2">
+      <span className="min-w-16 font-medium">{c.name}</span>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400">
+        <label className="flex items-center gap-1">Pixel
+          <input className={cell} value={px} placeholder="µm" onChange={(e) => setPx(e.target.value)} onBlur={() => save()} /> µm
+        </label>
+        <label className="flex items-center gap-1">Px
+          <input className={cell} value={rx} placeholder="X" onChange={(e) => setRx(e.target.value)} onBlur={() => save()} /> ×
+          <input className={cell} value={ry} placeholder="Y" onChange={(e) => setRy(e.target.value)} onBlur={() => save()} />
+        </label>
+        <select className="rounded border border-white/10 bg-black/30 px-2 py-1 text-xs text-white outline-none focus:border-indigo-400/60"
+          value={sensor} onChange={(e) => { setSensor(e.target.value); save(e.target.value) }}>
+          <option value="color">Color</option>
+          <option value="mono">Mono</option>
+        </select>
+      </div>
+      <button onClick={() => api.delete(`/api/equipment/cameras/${c.id}`).then(reload)} className="rounded-lg p-1.5 text-slate-400 hover:bg-red-500/20 hover:text-red-300"><Trash2 className="h-4 w-4" /></button>
     </div>
   )
 }
