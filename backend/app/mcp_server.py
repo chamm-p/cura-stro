@@ -19,7 +19,8 @@ from app.models.user import User
 from app.services import object_info as oi
 from app.services import target_service
 
-logger = logging.getLogger(__name__)
+# uvicorn.error-Logger → erscheint zuverlässig in `docker compose logs backend`.
+logger = logging.getLogger("uvicorn.error")
 
 # streamable_http_path="/" → die ASGI-App bedient die Wurzel; wir mounten sie
 # unter /mcp, sodass der externe Endpunkt genau .../mcp/ ist.
@@ -34,7 +35,10 @@ mcp = FastMCP(
 
 
 async def _user(db) -> User | None:
-    return await db.scalar(select(User).order_by(User.created_at))
+    """Aktiven User wählen: zuletzt eingeloggt zuerst (der OIDC-User hat ein
+    last_login, der Bootstrap-`astro`-User i.d.R. nicht) — so laufen die Tools
+    auf den Daten (Standorte/Equipment) des tatsächlich genutzten Accounts."""
+    return await db.scalar(select(User).order_by(User.last_login.desc().nullslast(), User.created_at))
 
 
 @mcp.tool()
@@ -65,10 +69,13 @@ async def list_good_targets(
         user = await _user(db)
         if not user:
             return {"error": "Kein Benutzer vorhanden."}
-        return await target_service.good_targets(
+        res = await target_service.good_targets(
             db, user, date=date, location_name=location, catalog=catalog,
             type_group=object_type, min_altitude=min_altitude, max_magnitude=max_magnitude, limit=limit,
         )
+        logger.info("MCP list_good_targets user=%s loc=%s → %s", user.username, location,
+                    res.get("error") or f"{res.get('count')} Ziele @ {res.get('location')}")
+        return res
 
 
 @mcp.tool()
@@ -86,7 +93,9 @@ async def get_astro_weather(date: str | None = None, location: str | None = None
         user = await _user(db)
         if not user:
             return {"error": "Kein Benutzer vorhanden."}
-        return await target_service.astro_weather(db, user, date=date, location_name=location)
+        res = await target_service.astro_weather(db, user, date=date, location_name=location)
+        logger.info("MCP get_astro_weather user=%s → %s", user.username, res.get("error") or res.get("location"))
+        return res
 
 
 @mcp.tool()
@@ -98,6 +107,7 @@ async def get_object_info(ident: str) -> dict:
     """
     async with async_session() as db:
         obj = await db.scalar(select(CatalogObject).where(CatalogObject.ident == ident.strip()))
+        logger.info("MCP get_object_info ident=%s → %s", ident, "ok" if obj else "nicht gefunden")
         if not obj:
             return {"error": f"Objekt '{ident}' nicht im Katalog."}
         info = await oi.get_object_info(db, obj)
