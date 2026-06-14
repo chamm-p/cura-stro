@@ -34,6 +34,8 @@ class ConfigIn(BaseModel):
     mode: str = Field(default="local", pattern="^(local|smb)$")
     root: str | None = Field(default=None, max_length=500)
     nas: NasIn | None = None
+    raw_folder: str | None = Field(default=None, max_length=120)
+    developer_folder: str | None = Field(default=None, max_length=120)
 
 
 def _config_out(user: User) -> dict:
@@ -42,6 +44,8 @@ def _config_out(user: User) -> dict:
     return {
         "mode": cfg["mode"],
         "root": cfg["root"],
+        "raw_folder": cfg["raw_folder"],
+        "developer_folder": cfg["developer_folder"],
         "nas": {
             "host": nas.get("host") or "",
             "share": nas.get("share") or "",
@@ -64,6 +68,10 @@ async def put_config(body: ConfigIn, user: User = Depends(get_current_user), db:
     a["mode"] = body.mode
     if body.root is not None:
         a["root"] = body.root or None
+    if body.raw_folder is not None:
+        a["raw_folder"] = body.raw_folder.strip() or None
+    if body.developer_folder is not None:
+        a["developer_folder"] = body.developer_folder.strip() or None
     if body.nas is not None:
         nas = dict(a.get("nas") or {})
         for k in ("host", "share", "path", "username"):
@@ -101,7 +109,10 @@ async def test_config(
 ):
     cfg = _override_from(body, user)
     storage = arch.get_storage(user, override=cfg)
-    status = await asyncio.to_thread(storage.status)
+    acfg = arch.archive_config(user)
+    raw = (body.raw_folder if body and body.raw_folder else acfg["raw_folder"])
+    dev = (body.developer_folder if body and body.developer_folder else acfg["developer_folder"])
+    status = await asyncio.to_thread(storage.status, raw, dev)
     ok = bool(status.get("writable"))
     return {"ok": ok, "status": status}
 
@@ -109,5 +120,6 @@ async def test_config(
 @router.get("/status")
 async def get_status(user: User = Depends(get_current_user)):
     storage = arch.get_storage(user)
-    status = await asyncio.to_thread(storage.status)
+    acfg = arch.archive_config(user)
+    status = await asyncio.to_thread(storage.status, acfg["raw_folder"], acfg["developer_folder"])
     return status

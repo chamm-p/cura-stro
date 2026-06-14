@@ -83,7 +83,7 @@ class LocalStorage(Storage):
     def full_path(self, rel: str) -> str:
         return str(self._abs(rel))
 
-    def status(self) -> dict:
+    def status(self, raw: str = "RAW", developer: str = "Developer") -> dict:
         p = Path(self.root)
         exists = p.exists()
         mnt = _mount_for(self.root)
@@ -93,7 +93,7 @@ class LocalStorage(Storage):
             "mountpoint": mnt[0] if mnt else None, "fstype": fstype,
             "is_network": bool(fstype and fstype.lower() in NETWORK_FS),
             "writable": False, "total_bytes": None, "free_bytes": None,
-            "raw_exists": (p / "RAW").exists(), "developer_exists": (p / "Developer").exists(),
+            "raw_exists": (p / raw).exists(), "developer_exists": (p / developer).exists(),
             "error": None,
         }
         if exists:
@@ -179,7 +179,7 @@ class SmbStorage(Storage):
     def full_path(self, rel: str) -> str:
         return self._unc(rel)
 
-    def status(self) -> dict:
+    def status(self, raw: str = "RAW", developer: str = "Developer") -> dict:
         import smbclient
         import smbclient.path as smbpath
         info = {
@@ -201,8 +201,8 @@ class SmbStorage(Storage):
                 f.write(b"ok")
             smbclient.remove(probe)
             info["writable"] = True
-            info["raw_exists"] = smbpath.exists(self._unc("RAW"))
-            info["developer_exists"] = smbpath.exists(self._unc("Developer"))
+            info["raw_exists"] = smbpath.exists(self._unc(raw))
+            info["developer_exists"] = smbpath.exists(self._unc(developer))
         except Exception as e:  # noqa: BLE001
             info["error"] = str(e)
         return info

@@ -117,7 +117,7 @@ async def delete_subframe(
     # Datei im aktuellen Storage entfernen (rel-Pfad rekonstruieren → SMB-fähig).
     obj = await archive.object_label(db, obs)
     dev = await archive.device_label(db, obs)
-    rel = f"{archive.reldir('RAW', obj, dev)}/{PurePosixPath(s.original_filename).name}"
+    rel = f"{archive.reldir(archive.folder_name(user, 'RAW'), obj, dev)}/{PurePosixPath(s.original_filename).name}"
     storage = archive.get_storage(user)
     try:
         await asyncio.to_thread(storage.delete, rel)

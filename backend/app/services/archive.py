@@ -34,7 +34,16 @@ def archive_config(user: User) -> dict:
         "mode": a.get("mode") or "local",
         "root": a.get("root") or _cfg.archive_root,
         "nas": dict(a.get("nas") or {}),
+        # Top-Level-Ordnernamen (nutzerspezifische Konvention).
+        "raw_folder": a.get("raw_folder") or "RAW",
+        "developer_folder": a.get("developer_folder") or "Developer",
     }
+
+
+def folder_name(user: User, kind: str) -> str:
+    """Logische Art (RAW|Developer) → konfigurierter Ordnername."""
+    cfg = archive_config(user)
+    return cfg["developer_folder"] if kind == "Developer" else cfg["raw_folder"]
 
 
 def get_storage(user: User, override: dict | None = None) -> Storage:
@@ -67,10 +76,10 @@ async def device_label(db: AsyncSession, obs: Observation) -> str:
     return "Unbekannt"
 
 
-def reldir(kind: str, obj_label: str, dev_label: str) -> str:
-    if kind not in ("RAW", "Developer"):
-        raise ValueError(f"Ungültige Archiv-Art: {kind!r}")
-    return f"{kind}/{asi.safe_component(obj_label)}/{asi.safe_component(dev_label)}"
+def reldir(folder: str, obj_label: str, dev_label: str) -> str:
+    """Relativer Pfad ``<Ordner>/<Objekt>/<Gerät>``. ``folder`` ist bereits der
+    konfigurierte Top-Level-Ordnername (z. B. „Raw-Files")."""
+    return f"{asi.safe_component(folder)}/{asi.safe_component(obj_label)}/{asi.safe_component(dev_label)}"
 
 
 async def _existing_filenames(db: AsyncSession, obs: Observation) -> set[str]:
@@ -101,7 +110,7 @@ async def import_files(
     storage = get_storage(user)
     obj = await object_label(db, obs)
     dev = await device_label(db, obs)
-    base = reldir(kind, obj, dev)
+    base = reldir(folder_name(user, kind), obj, dev)
     known = await _existing_filenames(db, obs)
     results = []
     filed = 0

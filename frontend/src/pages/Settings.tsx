@@ -428,7 +428,7 @@ function GeneralTab() {
 
 // ─── Archiv & ASIAir ───
 interface ArchConfig {
-  mode: 'local' | 'smb'; root: string
+  mode: 'local' | 'smb'; root: string; raw_folder: string; developer_folder: string
   nas: { host: string; share: string; path: string; username: string; password_set: boolean }
 }
 function ArchiveTab() {
@@ -454,6 +454,8 @@ function ArchiveTab() {
   const payload = () => ({
     mode: cfg!.mode,
     root: cfg!.root,
+    raw_folder: cfg!.raw_folder,
+    developer_folder: cfg!.developer_folder,
     nas: {
       host: cfg!.nas.host, share: cfg!.nas.share, path: cfg!.nas.path,
       username: cfg!.nas.username, ...(pw ? { password: pw } : {}),
@@ -525,6 +527,13 @@ function ArchiveTab() {
             </Field>
           </div>
         )}
+
+        {/* Ordnernamen (deine Konvention) */}
+        <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <Field label="Ordner Roh-Subs"><input className={inputCls} placeholder="RAW" value={cfg.raw_folder} onChange={(e) => setCfg({ ...cfg, raw_folder: e.target.value })} /></Field>
+          <Field label="Ordner Ergebnis (PixInsight)"><input className={inputCls} placeholder="Developer" value={cfg.developer_folder} onChange={(e) => setCfg({ ...cfg, developer_folder: e.target.value })} /></Field>
+        </div>
+        <p className="mt-1.5 text-[11px] text-slate-500">Top-Level-Ordner deiner Ablage. Darunter <span className="font-mono">&lt;Objekt&gt;/&lt;Gerät&gt;/</span>. Beispiel: <span className="font-mono">{cfg.raw_folder || 'RAW'}/M11/E127/</span>.</p>
 
         <div className="mt-4 flex flex-wrap items-center gap-2">
           <button onClick={save} className={btnPrimary}><Save className="h-4 w-4" /> {saved ? 'Gespeichert ✓' : 'Speichern'}</button>
