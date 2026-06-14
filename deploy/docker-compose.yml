@@ -1,0 +1,79 @@
+# cura-stro — Astrofotografie-App
+# Multi-Arch (amd64 + arm64): alle Base-Images sind multi-arch.
+#
+#   cp .env.example .env   # dann anpassen
+#   docker compose up -d --build
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: curastro-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-curastro}
+      POSTGRES_USER: ${POSTGRES_USER:-curastro}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [curastro-net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-curastro}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    image: curastro-backend:dev
+    container_name: curastro-backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-curastro}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-curastro}
+      SEEING_SCRAPER_URL: http://weather-scraper:8090
+    ports:
+      - "${BACKEND_PORT:-9605}:8000"
+    volumes:
+      - outputs:/app/outputs
+    depends_on:
+      db: { condition: service_healthy }
+    networks: [curastro-net]
+
+  weather-scraper:
+    build:
+      context: ../weather-scraper
+      dockerfile: Dockerfile
+    image: curastro-weather-scraper:dev
+    container_name: curastro-weather-scraper
+    restart: unless-stopped
+    networks: [curastro-net]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8090/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile.prod
+      args:
+        VITE_API_URL: ""
+    image: curastro-frontend:dev
+    container_name: curastro-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-9601}:80"
+    depends_on:
+      - backend
+    networks: [curastro-net]
+
+volumes:
+  pgdata:
+  outputs:
+
+networks:
+  curastro-net:
+    driver: bridge

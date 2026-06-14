@@ -1,0 +1,31 @@
+# ─── cura-stro Backend ───
+# FastAPI + async SQLAlchemy + Alembic (Muster aus curai)
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+sqlalchemy[asyncio]==2.0.40
+asyncpg==0.30.0
+alembic==1.15.2
+pydantic==2.11.7
+pydantic-settings==2.10.1
+pydantic[email]==2.11.7
+python-dotenv==1.0.1
+httpx==0.28.1
+
+# ─── Auth ───
+python-jose[cryptography]==3.3.0   # JWT
+bcrypt==4.2.1                       # Passwort-Hashing (direkt, ohne passlib)
+authlib==1.6.5                      # Generic-OIDC (Discovery + JWKS), aus curai
+
+# ─── Astronomie (Phase 3) ───
+numpy==1.26.4
+astropy==6.1.7        # Koordinaten/AltAz/Zeiten + FITS (Phase 6)
+astroplan==0.10.1     # Observer, Mond (Phase 4)
+
+# ─── Bildverarbeitung (Phase 6) ───
+pillow==11.0.0        # JPG-Ausgabe
+tifffile==2024.8.30   # TIFF (16/32-bit Astro)
+xisf==0.9.5           # XISF (PixInsight) lesen
+python-multipart==0.0.20  # Datei-Uploads (FastAPI)
+
+# ─── MCP-Server (Phase 8) ───
+mcp>=1.9.0,<2.0.0     # Streamable-HTTP-Server für externe LLMs (curai)
