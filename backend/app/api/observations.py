@@ -16,6 +16,7 @@ from app.models.catalog import CatalogObject
 from app.models.image import Image
 from app.models.observation import Observation
 from app.models.observing import Telescope
+from app.models.subframe import SubFrame
 from app.models.user import User
 from app.schemas.observation import ObservationCreate, ObservationOut, ObservationUpdate, PlanRequest
 from sqlalchemy import func
@@ -23,7 +24,14 @@ from sqlalchemy import func
 router = APIRouter(prefix="/api/observations", tags=["observations"])
 
 
-def _out(o: Observation, obj: CatalogObject | None, scope: Telescope | None, image_count: int = 0) -> ObservationOut:
+def _out(
+    o: Observation,
+    obj: CatalogObject | None,
+    scope: Telescope | None,
+    image_count: int = 0,
+    subframe_count: int = 0,
+    integration_s: float = 0.0,
+) -> ObservationOut:
     label = (obj.ident if obj else None) or o.target_label or "—"
     return ObservationOut(
         id=str(o.id),
@@ -43,6 +51,8 @@ def _out(o: Observation, obj: CatalogObject | None, scope: Telescope | None, ima
         is_new=o.is_new,
         created_at=o.created_at.isoformat() if o.created_at else None,
         image_count=image_count,
+        subframe_count=subframe_count,
+        integration_s=integration_s,
     )
 
 
@@ -61,7 +71,18 @@ async def list_observations(user: User = Depends(get_current_user), db: AsyncSes
             select(Image.observation_id, func.count()).where(Image.user_id == user.id).group_by(Image.observation_id)
         )
     )
-    return [_out(o, obj, scope, counts.get(o.id, 0)) for o, obj, scope in rows]
+    sub_stats = {
+        oid: (n, integ or 0.0)
+        for oid, n, integ in await db.execute(
+            select(SubFrame.observation_id, func.count(), func.coalesce(func.sum(SubFrame.exposure_s), 0.0))
+            .where(SubFrame.user_id == user.id)
+            .group_by(SubFrame.observation_id)
+        )
+    }
+    return [
+        _out(o, obj, scope, counts.get(o.id, 0), *sub_stats.get(o.id, (0, 0.0)))
+        for o, obj, scope in rows
+    ]
 
 
 async def _uuid_or_none(val: str | None) -> uuid.UUID | None:
@@ -194,4 +215,9 @@ async def delete_observation(obs_id: str, user: User = Depends(get_current_user)
         for p in (img.file_path, img.jpg_path):
             if p:
                 Path(p).unlink(missing_ok=True)
+    # Subframe-Dateien im Archiv mit entfernen (DB-Cascade löscht nur Zeilen).
+    subs = await db.scalars(select(SubFrame.archive_path).where(SubFrame.observation_id == o.id))
+    for p in subs:
+        if p:
+            Path(p).unlink(missing_ok=True)
     await db.delete(o)

@@ -1,8 +1,9 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
-import { ListChecks, Trash2, Plus, Loader2, Image as ImageIcon, ChevronUp, ChevronDown, StickyNote, X } from 'lucide-react'
+import { ListChecks, Trash2, Plus, Loader2, Image as ImageIcon, ChevronUp, ChevronDown, StickyNote, X, Layers } from 'lucide-react'
 import api from '../services/api'
 import Layout from '../components/Layout'
 import ImagesModal from '../components/ImagesModal'
+import SubsModal from '../components/SubsModal'
 
 interface Obs {
   id: string; catalog_object_id: string | null
@@ -10,6 +11,7 @@ interface Obs {
   target_label: string | null; display_label: string; status: string
   telescope_id: string | null; telescope_name: string | null; planned_date: string | null
   rating: number | null; notes: string | null; is_new: boolean; image_count: number
+  subframe_count: number; integration_s: number
 }
 interface Scope { id: string; name: string }
 
@@ -25,12 +27,19 @@ const TYPE_LABEL: Record<string, string> = {
 }
 const input = 'rounded-lg border border-white/10 bg-black/30 px-2.5 py-1.5 text-sm text-white outline-none focus:border-indigo-400/60'
 
+function fmtInteg(s: number) {
+  if (!s) return ''
+  const h = Math.floor(s / 3600); const m = Math.round((s % 3600) / 60)
+  return h > 0 ? `${h}h${m > 0 ? ` ${m}m` : ''}` : `${m}m`
+}
+
 export default function Manage() {
   const [rows, setRows] = useState<Obs[]>([])
   const [scopes, setScopes] = useState<Scope[]>([])
   const [loading, setLoading] = useState(true)
   const [newLabel, setNewLabel] = useState('')
   const [imgFor, setImgFor] = useState<Obs | null>(null)
+  const [subsFor, setSubsFor] = useState<Obs | null>(null)
   const [notesFor, setNotesFor] = useState<Obs | null>(null)
   const [sortField, setSortField] = useState<string | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
@@ -114,9 +123,10 @@ export default function Manage() {
                 <th className="px-3 py-2.5">Typ</th>
                 <SortTh label="Status" field="status" active={sortField} dir={sortDir} onClick={toggleSort} />
                 <th className="px-3 py-2.5">Teleskop</th>
+                <th className="px-3 py-2.5">Subs</th>
                 <th className="px-3 py-2.5">Datum</th>
                 <SortTh label="Bewertung" field="rating" active={sortField} dir={sortDir} onClick={toggleSort} />
-                <th className="px-3 py-2.5">Fotos</th>
+                <th className="px-3 py-2.5">Ergebnis</th>
                 <th className="px-3 py-2.5">Notiz</th>
                 <th className="px-3 py-2.5"></th>
               </tr>
@@ -147,6 +157,13 @@ export default function Manage() {
                       <option value="">—</option>
                       {scopes.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                     </select>
+                  </td>
+                  <td className="px-3 py-2">
+                    <button onClick={() => setSubsFor(r)} title="Subs einsortieren / ansehen"
+                      className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-slate-200 hover:bg-white/10">
+                      <Layers className="h-3.5 w-3.5" />
+                      {r.subframe_count > 0 ? `${r.subframe_count} · ${fmtInteg(r.integration_s)}` : 'Subs'}
+                    </button>
                   </td>
                   <td className="px-3 py-2">
                     <input type="date" className={input} value={r.planned_date || ''} onChange={(e) => patch(r.id, { planned_date: e.target.value || null })} />
@@ -185,6 +202,15 @@ export default function Manage() {
           observationId={imgFor.id}
           label={imgFor.display_label}
           onClose={() => setImgFor(null)}
+          onChanged={load}
+        />
+      )}
+      {subsFor && (
+        <SubsModal
+          observationId={subsFor.id}
+          label={subsFor.display_label}
+          telescopeName={subsFor.telescope_name}
+          onClose={() => setSubsFor(null)}
           onChanged={load}
         />
       )}

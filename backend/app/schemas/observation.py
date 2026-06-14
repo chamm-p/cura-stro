@@ -50,3 +50,5 @@ class ObservationOut(BaseModel):
     is_new: bool = False
     created_at: str | None
     image_count: int = 0
+    subframe_count: int = 0
+    integration_s: float = 0.0
