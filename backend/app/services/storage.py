@@ -203,6 +203,13 @@ class SmbStorage(Storage):
             info["writable"] = True
             info["raw_exists"] = smbpath.exists(self._unc(raw))
             info["developer_exists"] = smbpath.exists(self._unc(developer))
+            # Freier/gesamter Speicher des NAS-Volumes (best effort).
+            try:
+                vol = smbclient.stat_volume(self._unc(""))
+                info["total_bytes"] = vol.total_size
+                info["free_bytes"] = vol.caller_available_size
+            except Exception:  # noqa: BLE001
+                pass
         except Exception as e:  # noqa: BLE001
             info["error"] = str(e)
         return info
