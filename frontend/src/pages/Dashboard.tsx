@@ -14,7 +14,7 @@ interface Conditions {
   available: boolean
   location?: { name: string }
   moon?: { illumination_pct: number; phase_name: string; up: boolean; best_window?: { start: string | null; end: string | null; reason: string } | null }
-  weather?: { available: boolean; cloud_cover?: number; verdict?: string; verdict_text?: string; wind_gusts?: number; storm?: boolean; windy?: boolean }
+  weather?: { available: boolean; cloud_cover?: number; cloud_low?: number | null; cloud_mid?: number | null; cloud_high?: number | null; verdict?: string; verdict_text?: string; wind_gusts?: number; storm?: boolean; windy?: boolean }
 }
 
 export default function Dashboard() {
@@ -90,6 +90,11 @@ function ConditionsCard() {
               <span className="text-slate-500">keine Wetterdaten</span>
             )}
           </div>
+          {c.weather?.available && (c.weather.cloud_low != null || c.weather.cloud_mid != null || c.weather.cloud_high != null) && (
+            <div className="pl-6 text-xs text-slate-500">
+              Schichten — tief {c.weather.cloud_low ?? '–'} · mittel {c.weather.cloud_mid ?? '–'} · hoch {c.weather.cloud_high ?? '–'} %
+            </div>
+          )}
           {c.weather?.available && (c.weather.windy || c.weather.storm) && (
             <div className={`flex items-center gap-2 ${c.weather.storm ? 'text-red-300' : 'text-amber-300'}`}>
               <Wind className="h-4 w-4" />
@@ -97,15 +102,23 @@ function ConditionsCard() {
             </div>
           )}
           {(() => {
-            const unfav = !!c.moon?.up && (c.moon?.illumination_pct ?? 0) > 70
+            const pct = c.moon?.illumination_pct ?? 0
+            const up = !!c.moon?.up
+            const unfav = up && pct > 70           // hell & über Horizont → stört
+            const good = !up || pct < 20           // unten oder fast dunkel → optimal
+            const txt = unfav ? 'text-amber-300' : good ? 'text-emerald-300' : 'text-slate-300'
+            const ic = unfav ? 'text-amber-300' : good ? 'text-emerald-300' : 'text-slate-400'
             return (
-              <div className={`flex items-center gap-2 ${unfav ? 'text-amber-300' : 'text-slate-300'}`}>
-                <Moon className={`h-4 w-4 ${unfav ? 'text-amber-300' : 'text-slate-400'}`} />
-                {c.moon?.phase_name} · {c.moon?.illumination_pct}% {c.moon?.up ? '' : '(unter Horizont)'}
+              <div className={`flex items-center gap-2 ${txt}`}>
+                <Moon className={`h-4 w-4 ${ic}`} />
+                {c.moon?.phase_name} · {pct}% {up ? '' : '(unter Horizont)'}
                 {unfav && (
                   <span className="flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] text-amber-200">
                     <AlertTriangle className="h-3 w-3" /> ungünstig
                   </span>
+                )}
+                {good && (
+                  <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] text-emerald-200">günstig</span>
                 )}
               </div>
             )

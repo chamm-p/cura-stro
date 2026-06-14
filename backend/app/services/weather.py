@@ -96,17 +96,30 @@ async def fetch_night_weather(
         arr = hourly.get(name) or []
         return [arr[i] for i in idx if i < len(arr)]
 
-    cloud = _mean(col("cloudcover"))
+    # Effektive Bewölkung je Stunde = SCHLECHTESTE Schicht. Open-Meteos
+    # „cloudcover" (Gesamt) kann eine dichte Mittel-/Hochschicht wegmitteln;
+    # fürs Fotografieren blockt jede dichte Schicht. Daher max über
+    # gesamt/tief/mittel/hoch.
+    ct = hourly.get("cloudcover") or []
+    cl = hourly.get("cloudcover_low") or []
+    cm = hourly.get("cloudcover_mid") or []
+    ch = hourly.get("cloudcover_high") or []
+
+    def _eff(i: int) -> float | None:
+        vals = [a[i] for a in (ct, cl, cm, ch) if i < len(a) and a[i] is not None]
+        return max(vals) if vals else None
+
+    eff = {i: _eff(i) for i in idx}
+    cloud = _mean([eff[i] for i in idx])
     precip = _mean(col("precipitation_probability"))
     gust = _max(col("windgusts_10m"))
     code, text = _verdict(cloud, precip, gust)
 
-    cloud_series = hourly.get("cloudcover") or []
     gust_series = hourly.get("windgusts_10m") or []
     hourly_cloud = [
-        {"time": times[i], "cloud": cloud_series[i]}
+        {"time": times[i], "cloud": eff[i]}
         for i in idx
-        if i < len(cloud_series)
+        if eff[i] is not None
     ]
     hourly_wind = [
         {"time": times[i], "gust": gust_series[i]}
