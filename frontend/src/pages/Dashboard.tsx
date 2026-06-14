@@ -12,9 +12,17 @@ const VERDICT_STYLE: Record<string, string> = {
 
 interface Conditions {
   available: boolean
-  location?: { name: string }
+  location?: { name: string; id?: string }
+  clouds?: { source: string; fetched_at?: string | null; can_refresh: boolean }
   moon?: { illumination_pct: number; phase_name: string; up: boolean; best_window?: { start: string | null; end: string | null; reason: string } | null }
   weather?: { available: boolean; cloud_cover?: number; cloud_low?: number | null; cloud_mid?: number | null; cloud_high?: number | null; verdict?: string; verdict_text?: string; wind_gusts?: number; storm?: boolean; windy?: boolean }
+}
+
+function ageText(iso: string): string {
+  const h = (Date.now() - new Date(iso).getTime()) / 3.6e6
+  if (h < 1) return 'gerade aktualisiert'
+  if (h < 24) return `vor ${Math.round(h)} h`
+  return `vor ${Math.round(h / 24)} d`
 }
 
 export default function Dashboard() {
@@ -64,9 +72,16 @@ export default function Dashboard() {
 
 function ConditionsCard() {
   const [c, setC] = useState<Conditions | null>(null)
-  useEffect(() => {
-    api.get('/api/targets/conditions').then((r) => setC(r.data)).catch(() => setC({ available: false }))
-  }, [])
+  const [busy, setBusy] = useState(false)
+  const load = () => api.get('/api/targets/conditions').then((r) => setC(r.data)).catch(() => setC({ available: false }))
+  useEffect(() => { load() }, [])
+
+  const refresh = async () => {
+    if (!c?.location?.id) return
+    setBusy(true)
+    try { await api.post(`/api/clouds/refresh?location_id=${c.location.id}`); await load() }
+    finally { setBusy(false) }
+  }
 
   const cls = 'block rounded-2xl border border-white/10 bg-[#0c1024] p-6'
 
@@ -136,6 +151,17 @@ function ConditionsCard() {
                 Kein gutes Fenster heute Nacht <span className="text-xs text-red-300/70">({c.moon.best_window.reason})</span>
               </div>
             )
+          )}
+          {c.clouds && (
+            <div className="flex items-center gap-1.5 pt-1 text-[11px] text-slate-500">
+              <span>Wolken: {c.clouds.source === 'meteoblue' ? 'meteoblue' : 'Open-Meteo (Modell)'}</span>
+              {c.clouds.source === 'meteoblue' && c.clouds.fetched_at && <span>· {ageText(c.clouds.fetched_at)}</span>}
+              {c.clouds.can_refresh && (
+                <button onClick={refresh} disabled={busy} title="meteoblue-Wolken jetzt aktualisieren" className="ml-0.5 text-indigo-300 hover:text-indigo-200 disabled:opacity-50">
+                  {busy ? '… lädt' : '↻'}
+                </button>
+              )}
+            </div>
           )}
           <p className="pt-1 text-xs text-slate-500">{c.location?.name} · heute Nacht</p>
         </div>

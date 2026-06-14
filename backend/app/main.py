@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 
 from app.api import auth, calculator, equipment, geocode, health, images, locations, objects, observations, seeing, targets, users
-from app.api import archive, asiair, mcp_config, slideshow, subframes
+from app.api import archive, asiair, clouds as clouds_api, mcp_config, slideshow, subframes
 from app.api import settings as settings_api
 from app.config import get_settings
 from app.core.security import hash_password
@@ -84,10 +84,17 @@ async def lifespan(app: FastAPI):
             await seed_catalog(db)
     except Exception:
         logger.exception("⚠️ Katalog-Seeding fehlgeschlagen")
+    # meteoblue-Wolken-Scheduler (1×/Tag) als Hintergrund-Task.
+    from app.services.clouds import daily_refresh_loop
+
+    cloud_task = asyncio.create_task(daily_refresh_loop())
     # MCP-Session-Manager mitlaufen lassen (Mount führt eigene Lifespans nicht aus).
     async with contextlib.AsyncExitStack() as stack:
         await stack.enter_async_context(mcp_server.session_manager.run())
-        yield
+        try:
+            yield
+        finally:
+            cloud_task.cancel()
 
 
 app = FastAPI(title=settings.app_name, version=settings.app_version, lifespan=lifespan)
@@ -139,6 +146,7 @@ app.include_router(slideshow.router)
 app.include_router(asiair.router)
 app.include_router(subframes.router)
 app.include_router(archive.router)
+app.include_router(clouds_api.router)
 
 
 @app.get("/")

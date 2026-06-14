@@ -17,7 +17,7 @@ from app.models.observation import Observation
 from app.models.observing import Location, Telescope
 from app.models.user import User
 from app.schemas.targets import TargetListOut, TargetOut
-from app.services import astro, weather
+from app.services import astro, cloud_vision, clouds, weather
 
 router = APIRouter(prefix="/api/targets", tags=["targets"])
 
@@ -110,23 +110,62 @@ async def conditions(
     wx = await weather.fetch_night_weather(loc.latitude, loc.longitude, tz, date, night_start, night_end)
 
     # Bestes Fenster: Dunkelheit (Mond) UND Wetter (Wolken <50 %, kein Sturm).
+    # Wolken bevorzugt aus meteoblue (Vision-LLM), sonst Open-Meteo.
+    mb_row = await clouds.get_cached(db, loc.id)
+    mb = clouds.night_lookup(mb_row.hours) if mb_row else {}
+    cloud_source = "open-meteo"
+
     best_window = moon.get("best_window")
     grid_iso = moon.get("grid_iso") or []
-    if wx.get("available") and grid_iso:
-        cloud_by_hour = {c["time"][:13]: c["cloud"] for c in (wx.get("hourly_cloud") or [])}
-        gust_by_hour = {g["time"][:13]: g["gust"] for g in (wx.get("hourly_wind") or [])}
+    om_cloud = {c["time"][:13]: c["cloud"] for c in (wx.get("hourly_cloud") or [])} if wx.get("available") else {}
+    gust_by_hour = {g["time"][:13]: g["gust"] for g in (wx.get("hourly_wind") or [])} if wx.get("available") else {}
+
+    if grid_iso:
         weather_ok = []
+        mb_eff, mb_low, mb_mid, mb_high = [], [], [], []
+        used_mb = 0
         for iso in grid_iso:
-            key = iso[:13]
-            cloud = cloud_by_hour.get(key)
-            gust = gust_by_hour.get(key)
+            d, hr = iso[:10], int(iso[11:13])
+            mbv = mb.get((d, hr))
+            if mbv:
+                cloud = mbv["eff"]; used_mb += 1
+                mb_eff.append(mbv["eff"]); mb_low.append(mbv["low"]); mb_mid.append(mbv["mid"]); mb_high.append(mbv["high"])
+            else:
+                cloud = om_cloud.get(iso[:13])
+            gust = gust_by_hour.get(iso[:13])
             ok = (cloud is None or cloud < weather.CLOUD_BAD) and (gust is None or gust < weather.STORM_GUST)
             weather_ok.append(ok)
-        best_window = astro.best_night_window(moon.get("grid") or [], moon.get("track") or [], weather_ok)
+
+        # meteoblue deckt die Nacht überwiegend ab → Anzeige + Verdict daraus.
+        if used_mb >= max(1, len(grid_iso) // 2):
+            cloud_source = "meteoblue"
+
+            def _m(xs):
+                return round(sum(xs) / len(xs), 1) if xs else None
+
+            eff_mean = _m(mb_eff)
+            wx = dict(wx)
+            wx["available"] = True
+            wx["cloud_cover"] = eff_mean
+            wx["cloud_low"], wx["cloud_mid"], wx["cloud_high"] = _m(mb_low), _m(mb_mid), _m(mb_high)
+            code, text = weather._verdict(eff_mean, wx.get("precip_probability"), wx.get("wind_gusts"))
+            wx["verdict"], wx["verdict_text"] = code, text
+
+        if wx.get("available") or used_mb:
+            best_window = astro.best_night_window(moon.get("grid") or [], moon.get("track") or [], weather_ok)
+
+    wx = dict(wx)
+    wx["cloud_source"] = cloud_source
+    wx["clouds_fetched_at"] = mb_row.fetched_at.isoformat() if (cloud_source == "meteoblue" and mb_row and mb_row.fetched_at) else None
 
     return {
         "available": True,
-        "location": {"name": loc.name},
+        "location": {"name": loc.name, "id": str(loc.id)},
+        "clouds": {
+            "source": cloud_source,
+            "fetched_at": mb_row.fetched_at.isoformat() if (cloud_source == "meteoblue" and mb_row and mb_row.fetched_at) else None,
+            "can_refresh": bool(loc.meteoblue_url and cloud_vision.is_enabled()),
+        },
         "date": date,
         "night_start": night_start,
         "night_end": night_end,

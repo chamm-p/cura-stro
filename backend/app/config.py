@@ -72,6 +72,15 @@ class Settings(BaseSettings):
     seeing_scraper_url: str = Field(default="http://weather-scraper:8090")
     seeing_cache_ttl_min: int = Field(default=120)
 
+    # ─── Vision-LLM (curai-Gateway, OpenAI-kompatibel) — liest die meteoblue-
+    # Wolken-Schichten aus dem Seeing-Screenshot. Leer = deaktiviert
+    # (Fallback Open-Meteo). ───
+    llm_gateway_url: str = Field(default="")          # z. B. https://cura.hammann.org/v1
+    llm_token: str = Field(default="")
+    llm_vision_model: str = Field(default="original/Qwen3.6")
+    # Tägliche Aktualisierung der meteoblue-Wolken (Hintergrund-Scheduler).
+    cloud_refresh_enabled: bool = Field(default=True)
+
     # ─── MCP-Server (Phase 8) — Token für externen Zugriff (curai etc.) ───
     # Leer = MCP-Endpunkt deaktiviert.
     mcp_token: str = Field(default="")
