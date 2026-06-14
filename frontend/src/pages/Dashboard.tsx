@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Stars, CloudMoon, ListChecks, Cloud, Moon, Images, Clock, AlertTriangle } from 'lucide-react'
+import { Stars, CloudMoon, ListChecks, Cloud, Moon, Images, Clock, AlertTriangle, Wind } from 'lucide-react'
 import { useAuthStore } from '../store/auth'
 import api from '../services/api'
 import Layout from '../components/Layout'
@@ -13,12 +13,8 @@ const VERDICT_STYLE: Record<string, string> = {
 interface Conditions {
   available: boolean
   location?: { name: string }
-  moon?: { illumination_pct: number; phase_name: string; up: boolean; best_window?: { start: string; end: string; reason: string } | null }
-  weather?: { available: boolean; cloud_cover?: number; verdict?: string; verdict_text?: string }
-}
-
-const WINDOW_REASON: Record<string, string> = {
-  mondfrei: 'mondfrei', 'Mond am tiefsten': 'Mond am tiefsten', 'dunkle Nachtmitte': 'dunkle Nachtmitte',
+  moon?: { illumination_pct: number; phase_name: string; up: boolean; best_window?: { start: string | null; end: string | null; reason: string } | null }
+  weather?: { available: boolean; cloud_cover?: number; verdict?: string; verdict_text?: string; wind_gusts?: number; storm?: boolean; windy?: boolean }
 }
 
 export default function Dashboard() {
@@ -85,7 +81,7 @@ function ConditionsCard() {
       ) : (
         <div className="mt-2 space-y-1.5 text-sm">
           <div className="flex items-center gap-2">
-            <Cloud className="h-4 w-4 text-slate-400" />
+            <Cloud className={`h-4 w-4 ${(c.weather?.cloud_cover ?? 0) >= 50 ? 'text-amber-300' : 'text-slate-400'}`} />
             {c.weather?.available ? (
               <span className={VERDICT_STYLE[c.weather.verdict || 'unknown']}>
                 {c.weather.verdict_text} · {c.weather.cloud_cover}% Wolken
@@ -94,6 +90,12 @@ function ConditionsCard() {
               <span className="text-slate-500">keine Wetterdaten</span>
             )}
           </div>
+          {c.weather?.available && (c.weather.windy || c.weather.storm) && (
+            <div className={`flex items-center gap-2 ${c.weather.storm ? 'text-red-300' : 'text-amber-300'}`}>
+              <Wind className="h-4 w-4" />
+              {c.weather.storm ? 'Sturm' : 'böig'} · Böen bis {c.weather.wind_gusts} km/h
+            </div>
+          )}
           {(() => {
             const unfav = !!c.moon?.up && (c.moon?.illumination_pct ?? 0) > 70
             return (
@@ -109,11 +111,18 @@ function ConditionsCard() {
             )
           })()}
           {c.moon?.best_window && (
-            <div className="flex items-center gap-2 text-slate-300">
-              <Clock className="h-4 w-4 text-slate-400" />
-              Beste Bedingungen: <span className="font-medium text-slate-200">{c.moon.best_window.start}–{c.moon.best_window.end}</span>
-              <span className="text-xs text-slate-500">({WINDOW_REASON[c.moon.best_window.reason] || c.moon.best_window.reason})</span>
-            </div>
+            c.moon.best_window.start ? (
+              <div className="flex items-center gap-2 text-slate-300">
+                <Clock className="h-4 w-4 text-slate-400" />
+                Beste Bedingungen: <span className="font-medium text-slate-200">{c.moon.best_window.start}–{c.moon.best_window.end}</span>
+                <span className="text-xs text-slate-500">({c.moon.best_window.reason})</span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 text-red-300">
+                <AlertTriangle className="h-4 w-4" />
+                Kein gutes Fenster heute Nacht <span className="text-xs text-red-300/70">({c.moon.best_window.reason})</span>
+              </div>
+            )
           )}
           <p className="pt-1 text-xs text-slate-500">{c.location?.name} · heute Nacht</p>
         </div>

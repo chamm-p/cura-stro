@@ -108,6 +108,22 @@ async def conditions(
         date_str=date, night_start=night_start, night_end=night_end,
     )
     wx = await weather.fetch_night_weather(loc.latitude, loc.longitude, tz, date, night_start, night_end)
+
+    # Bestes Fenster: Dunkelheit (Mond) UND Wetter (Wolken <50 %, kein Sturm).
+    best_window = moon.get("best_window")
+    grid_iso = moon.get("grid_iso") or []
+    if wx.get("available") and grid_iso:
+        cloud_by_hour = {c["time"][:13]: c["cloud"] for c in (wx.get("hourly_cloud") or [])}
+        gust_by_hour = {g["time"][:13]: g["gust"] for g in (wx.get("hourly_wind") or [])}
+        weather_ok = []
+        for iso in grid_iso:
+            key = iso[:13]
+            cloud = cloud_by_hour.get(key)
+            gust = gust_by_hour.get(key)
+            ok = (cloud is None or cloud < weather.CLOUD_BAD) and (gust is None or gust < weather.STORM_GUST)
+            weather_ok.append(ok)
+        best_window = astro.best_night_window(moon.get("grid") or [], moon.get("track") or [], weather_ok)
+
     return {
         "available": True,
         "location": {"name": loc.name},
@@ -116,7 +132,7 @@ async def conditions(
         "night_end": night_end,
         "moon": {
             "illumination_pct": moon["illumination_pct"], "phase_name": moon["phase_name"],
-            "up": moon["up"], "best_window": moon.get("best_window"),
+            "up": moon["up"], "best_window": best_window,
         },
         "weather": wx,
     }

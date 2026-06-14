@@ -158,59 +158,89 @@ def compute_moon(
 
     waxing = illum_later >= illum
     max_alt = float(alt.max())
+    labels = [g.strftime("%H:%M") for g in grid_local]
+    track = [round(float(x), 1) for x in alt]
     return {
         "illumination": round(illum, 3),
         "illumination_pct": round(illum * 100),
         "phase_name": _moon_phase_name(illum, waxing),
         "max_altitude": round(max_alt, 1),
         "up": max_alt > 0,
-        "track": [round(float(x), 1) for x in alt],
-        "best_window": _best_night_window(grid_local, [float(x) for x in alt]),
+        "track": track,
+        "grid": labels,
+        "grid_iso": [g.strftime("%Y-%m-%dT%H:%M") for g in grid_local],
+        "best_window": best_night_window(labels, track),
         "ra_deg": float(moon_mid.ra.deg),
         "dec_deg": float(moon_mid.dec.deg),
     }
 
 
-def _best_night_window(grid_local, alt) -> dict | None:
-    """Generisch-pauschal bestes Beobachtungsfenster der Nacht — primär nach
-    Dunkelheit: längster mondfreier Abschnitt; sonst um das Mond-Minimum bzw.
-    die dunkle Nachtmitte. Rückgabe {start, end, reason} (HH:MM) oder None."""
-    n = len(alt)
-    if n < 2:
-        return None
-
-    def hhmm(i: int) -> str:
-        return grid_local[i].strftime("%H:%M")
-
-    down = [a <= 0 for a in alt]
-    # Längster zusammenhängender mondfreier Lauf.
-    best = None  # (laenge, start, end)
+def _longest_run(mask: list[bool]) -> tuple[int, int, int] | None:
+    """Längster zusammenhängender True-Lauf → (laenge, start, end)."""
+    n = len(mask)
+    best = None
     i = 0
     while i < n:
-        if down[i]:
+        if mask[i]:
             j = i
-            while j + 1 < n and down[j + 1]:
+            while j + 1 < n and mask[j + 1]:
                 j += 1
             if best is None or (j - i) > best[0]:
                 best = (j - i, i, j)
             i = j + 1
         else:
             i += 1
+    return best
 
-    # Mondfreier Abschnitt vorhanden, aber nicht (fast) die ganze Nacht.
+
+def _moon_only_window(labels: list[str], alt: list[float]) -> dict | None:
+    n = len(alt)
+    down = [a <= 0 for a in alt]
+    best = _longest_run(down)
     if best is not None and best[0] >= 1 and best[0] < n * 0.9:
-        return {"start": hhmm(best[1]), "end": hhmm(best[2]), "reason": "mondfrei"}
-    # Mond die ganze Nacht über Horizont → Fenster um sein Minimum.
+        return {"start": labels[best[1]], "end": labels[best[2]], "reason": "mondfrei"}
     if not any(down):
         k = min(range(n), key=lambda x: alt[x])
         s, e = max(0, k - 3), min(n - 1, k + 3)
         if e > s:
-            return {"start": hhmm(s), "end": hhmm(e), "reason": "Mond am tiefsten"}
-    # Sonst (mondfrei ~ganze Nacht / Neumond) → dunkle Nachtmitte.
+            return {"start": labels[s], "end": labels[e], "reason": "Mond am tiefsten"}
     s, e = max(0, round(n * 0.25)), min(n - 1, round(n * 0.75))
     if e <= s:
         return None
-    return {"start": hhmm(s), "end": hhmm(e), "reason": "dunkle Nachtmitte"}
+    return {"start": labels[s], "end": labels[e], "reason": "dunkle Nachtmitte"}
+
+
+def best_night_window(labels: list[str], alt: list[float], weather_ok: list[bool] | None = None) -> dict | None:
+    """Generisch-pauschal bestes Beobachtungsfenster der Nacht.
+
+    Ohne ``weather_ok`` rein nach Mond (Dunkelheit). Mit ``weather_ok`` (je
+    Rasterpunkt: Wetter brauchbar, d. h. < 50 % Wolken & kein Sturm) wird das
+    Fenster auf „dunkel UND klar UND windstill" eingeschränkt; gibt es keins,
+    kommt ``start=None`` mit Begründung zurück. ``labels`` = HH:MM je Punkt."""
+    n = len(alt)
+    if n < 2 or len(labels) != n:
+        return None
+    if weather_ok is None:
+        return _moon_only_window(labels, alt)
+
+    good = [(alt[i] <= 0) and bool(weather_ok[i]) for i in range(n)]
+    run = _longest_run(good)
+    if run is not None and run[0] >= 1:
+        moon_ever_up = any(a > 0 for a in alt)
+        return {
+            "start": labels[run[1]], "end": labels[run[2]],
+            "reason": "klar & mondfrei" if moon_ever_up else "klar",
+        }
+    # Kein brauchbares Fenster → Hauptgrund nennen.
+    cloudy = sum(1 for ok in weather_ok if not ok)
+    moonup = sum(1 for a in alt if a > 0)
+    if cloudy >= n * 0.7:
+        reason = "durchgehend bewölkt/stürmisch"
+    elif moonup >= n * 0.9:
+        reason = "Mond die ganze Nacht hell"
+    else:
+        reason = "kein klares, mondfreies Fenster"
+    return {"start": None, "end": None, "reason": reason}
 
 
 def _moon_phase_name(illum: float, waxing: bool) -> str:
