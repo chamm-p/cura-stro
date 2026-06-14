@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import {
   MapPin, Crosshair, Search, Trash2, Plus, Star, Telescope, Camera as CamIcon,
   Filter as FilterIcon, Loader2, Save, Pencil, Server, Copy, RefreshCw, Check,
-  HardDrive, Radio,
+  HardDrive, Radio, CheckCircle2, AlertTriangle, XCircle,
 } from 'lucide-react'
 import api from '../services/api'
 import Layout from '../components/Layout'
@@ -458,6 +458,9 @@ function ArchiveTab() {
 
   return (
     <div className="space-y-6">
+      {/* Mount-Status */}
+      <MountStatus root={root} />
+
       {/* Archiv-Wurzel */}
       <div className={`${card} max-w-2xl`}>
         <h3 className="mb-1 flex items-center gap-2 font-semibold"><HardDrive className="h-4.5 w-4.5 text-indigo-300" /> Archiv-Wurzel</h3>
@@ -500,6 +503,85 @@ function ArchiveTab() {
       </div>
     </div>
   )
+}
+
+interface ArchStatus {
+  root: string; exists: boolean; writable: boolean; mountpoint?: string | null
+  fstype?: string | null; is_network: boolean; total_bytes?: number | null
+  free_bytes?: number | null; raw_exists: boolean; developer_exists: boolean; error?: string | null
+}
+function fmtGB(b?: number | null) {
+  if (!b) return '–'
+  const gb = b / 1024 ** 3
+  return gb >= 1024 ? `${(gb / 1024).toFixed(1)} TB` : `${gb.toFixed(1)} GB`
+}
+
+function MountStatus({ root }: { root: string }) {
+  const [s, setS] = useState<ArchStatus | null>(null)
+  const [busy, setBusy] = useState(false)
+  const load = () => { setBusy(true); api.get('/api/archive/status').then((r) => setS(r.data)).finally(() => setBusy(false)) }
+  // Bei Tab-Aufruf und nach Root-Änderung neu prüfen.
+  useEffect(() => { load() }, [root])
+
+  // Ampel: rot = nicht beschreibbar, grün = NAS (cifs), gelb = lokales Volume.
+  const tone = !s ? 'slate'
+    : (!s.exists || !s.writable) ? 'red'
+    : s.is_network ? 'green' : 'amber'
+  const ring = { slate: 'border-white/10', red: 'border-red-400/40', green: 'border-emerald-400/40', amber: 'border-amber-400/40' }[tone]
+  const Icon = tone === 'green' ? CheckCircle2 : tone === 'red' ? XCircle : tone === 'amber' ? AlertTriangle : Loader2
+  const iconCls = { slate: 'text-slate-400 animate-spin', red: 'text-red-300', green: 'text-emerald-300', amber: 'text-amber-300' }[tone]
+  const headline = !s ? 'Prüfe Mount …'
+    : (!s.exists) ? 'Archiv-Pfad existiert nicht'
+    : (!s.writable) ? 'Nicht beschreibbar'
+    : s.is_network ? `NAS gemountet (${s.fstype})` : 'Lokales Volume (kein NAS)'
+
+  return (
+    <div className={`${card} max-w-2xl border ${ring}`}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start gap-2">
+          <Icon className={`mt-0.5 h-5 w-5 shrink-0 ${iconCls}`} />
+          <div>
+            <div className="font-semibold">{headline}</div>
+            {s && (
+              <div className="mt-0.5 text-xs text-slate-400">
+                <span className="font-mono text-slate-300">{s.root}</span>
+                {s.mountpoint && s.mountpoint !== s.root && <> · Mount <span className="font-mono">{s.mountpoint}</span></>}
+                {s.fstype && <> · {s.fstype}</>}
+              </div>
+            )}
+          </div>
+        </div>
+        <button onClick={load} disabled={busy} className={btnGhost} title="Neu prüfen">
+          <RefreshCw className={`h-4 w-4 ${busy ? 'animate-spin' : ''}`} />
+        </button>
+      </div>
+
+      {s && (
+        <>
+          <div className="mt-3 flex flex-wrap gap-2 text-xs">
+            <Badge ok={s.writable}>{s.writable ? 'beschreibbar' : 'nicht beschreibbar'}</Badge>
+            <Badge ok={s.raw_exists} neutralIfFalse>RAW/ {s.raw_exists ? 'vorhanden' : 'wird beim 1. Import angelegt'}</Badge>
+            <Badge ok={s.developer_exists} neutralIfFalse>Developer/ {s.developer_exists ? 'vorhanden' : 'noch nicht'}</Badge>
+            <span className="rounded-full bg-white/10 px-2.5 py-1 text-slate-300">{fmtGB(s.free_bytes)} frei / {fmtGB(s.total_bytes)}</span>
+          </div>
+          {tone === 'amber' && (
+            <p className="mt-3 text-[11px] text-slate-500">
+              Daten liegen in einem lokalen Docker-Volume — <strong>nicht</strong> auf dem NAS. Für den NAS in
+              <span className="font-mono"> deploy/.env</span> das Overlay aktivieren
+              (<span className="font-mono">COMPOSE_FILE=docker-compose.yml:docker-compose.nas.yml</span>) + <span className="font-mono">NAS_*</span> setzen.
+            </p>
+          )}
+          {s.error && <p className="mt-2 text-[11px] text-red-300">{s.error}</p>}
+        </>
+      )}
+    </div>
+  )
+}
+
+function Badge({ ok, neutralIfFalse, children }: { ok: boolean; neutralIfFalse?: boolean; children: React.ReactNode }) {
+  const cls = ok ? 'bg-emerald-500/15 text-emerald-200'
+    : neutralIfFalse ? 'bg-white/10 text-slate-400' : 'bg-red-500/15 text-red-200'
+  return <span className={`rounded-full px-2.5 py-1 ${cls}`}>{children}</span>
 }
 
 function RigRow({ r, scopes, reload }: { r: Rig; scopes: Scope[]; reload: () => void }) {
