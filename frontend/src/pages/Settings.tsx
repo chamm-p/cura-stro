@@ -312,22 +312,23 @@ function EquipmentTab() {
             <Row key={c.id} onDelete={() => api.delete(`/api/equipment/cameras/${c.id}`).then(loadAll)}>
               <span className="font-medium">{c.name}</span>
               <span className="text-xs text-slate-500">
-                {c.sensor_type} · {c.pixel_size_um ? `${c.pixel_size_um} µm` : '— µm'}{c.res_x && c.res_y ? ` · ${c.res_x}×${c.res_y}` : ''}
+                {c.sensor_type} · {c.pixel_size_um ? `${c.pixel_size_um} µm` : '— µm'}{c.res_x ? ` · ${c.res_x}×${c.res_y ?? '?'}` : ''}
               </span>
             </Row>
           ))}
         </div>
-        <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-6">
+        <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-7">
           <input className={`${inputCls} sm:col-span-2`} placeholder="Name" value={cf.name} onChange={(e) => setCf({ ...cf, name: e.target.value })} />
           <input className={inputCls} placeholder="Pixel µm" value={cf.pixel_size_um || ''} onChange={(e) => setCf({ ...cf, pixel_size_um: e.target.value })} />
           <input className={inputCls} placeholder="Px X" value={cf.res_x || ''} onChange={(e) => setCf({ ...cf, res_x: e.target.value })} />
+          <input className={inputCls} placeholder="Px Y" value={cf.res_y || ''} onChange={(e) => setCf({ ...cf, res_y: e.target.value })} />
           <select className={inputCls} value={cf.sensor_type} onChange={(e) => setCf({ ...cf, sensor_type: e.target.value })}>
             <option value="color">Color</option>
             <option value="mono">Mono</option>
           </select>
           <button onClick={addCam} className={btnPrimary}><Plus className="h-4 w-4" /></button>
         </div>
-        <p className="mt-1.5 text-[11px] text-slate-500">Tipp: „Px Y" wird automatisch nicht benötigt für den groben Bildmaßstab; volle Auflösung kannst du später ergänzen.</p>
+        <p className="mt-1.5 text-[11px] text-slate-500">Pixelgröße (µm) + Auflösung X/Y in Pixeln — beides nötig für Bildfeld/Framing im Rechner.</p>
       </div>
 
       {/* Filter */}
