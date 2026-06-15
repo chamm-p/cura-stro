@@ -27,6 +27,7 @@ interface Moon { illumination_pct: number; phase_name: string; up: boolean; max_
 interface Weather {
   available: boolean; cloud_cover?: number; cloud_low?: number; cloud_mid?: number; cloud_high?: number
   precip_probability?: number; humidity?: number; wind?: number; verdict?: string; verdict_text?: string; note?: string
+  cloud_source?: string
 }
 interface Loc { id: string; name: string }
 interface Scope { id: string; name: string; limiting_magnitude: number | null; suggested_limiting_magnitude: number | null }
@@ -269,6 +270,7 @@ function WeatherMoonBar({ weather, moon }: { weather: Weather | null; moon: Moon
             <span className="opacity-80">· {weather.cloud_cover}% Wolken</span>
             {weather.precip_probability ? <span className="opacity-80">· {weather.precip_probability}% Niederschlag</span> : null}
             {weather.wind != null ? <span className="opacity-70">· {weather.wind} km/h</span> : null}
+            <span className="rounded-full bg-white/10 px-1.5 text-[10px] opacity-70">{weather.cloud_source === 'meteoblue' ? 'meteoblue' : 'Open-Meteo'}</span>
           </div>
         ) : (
           <div className="flex items-center gap-2 rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-sm text-slate-300">

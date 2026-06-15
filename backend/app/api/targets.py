@@ -317,7 +317,43 @@ async def list_targets(
     wx = await weather.fetch_night_weather(loc.latitude, loc.longitude, tz, date, night_start, night_end)
     grid_local, _ = astro.night_grid(date, night_start, night_end, tz)
     cloud_by_hour = {h["time"][:13]: h["cloud"] for h in (wx.get("hourly_cloud") or [])}
-    clouds_grid: list[float | None] = [cloud_by_hour.get(g.strftime("%Y-%m-%dT%H")) for g in grid_local]
+    gust_by_hour = {h["time"][:13]: h["gust"] for h in (wx.get("hourly_wind") or [])}
+
+    # Wolken bevorzugt aus meteoblue (Vision-LLM), sonst Open-Meteo.
+    mb_row = await clouds.get_cached(db, loc.id)
+    mb = clouds.night_lookup(mb_row.hours) if mb_row else {}
+    clouds_grid: list[float | None] = []
+    mb_eff, mb_low, mb_mid, mb_high = [], [], [], []
+    for g in grid_local:
+        mbv = mb.get((g.strftime("%Y-%m-%d"), g.hour))
+        if mbv:
+            clouds_grid.append(mbv["eff"])
+            mb_eff.append(mbv["eff"]); mb_low.append(mbv["low"]); mb_mid.append(mbv["mid"]); mb_high.append(mbv["high"])
+        else:
+            clouds_grid.append(cloud_by_hour.get(g.strftime("%Y-%m-%dT%H")))
+
+    wx = dict(wx)
+    if len(mb_eff) >= max(1, len(grid_local) // 2):
+        def _m(xs):
+            return round(sum(xs) / len(xs), 1) if xs else None
+        wx["available"] = True
+        wx["cloud_cover"] = _m(mb_eff)
+        wx["cloud_low"], wx["cloud_mid"], wx["cloud_high"] = _m(mb_low), _m(mb_mid), _m(mb_high)
+        code, text = weather._verdict(_m(mb_eff), wx.get("precip_probability"), wx.get("wind_gusts"))
+        wx["verdict"], wx["verdict_text"] = code, text
+        wx["cloud_source"] = "meteoblue"
+        wx["clouds_fetched_at"] = mb_row.fetched_at.isoformat() if mb_row and mb_row.fetched_at else None
+    else:
+        wx["cloud_source"] = "open-meteo"
+
+    # Nacht-Bestfenster (Mond × klar × windstill) — auch fürs Objektbrowser-Bar.
+    weather_ok = [
+        (clouds_grid[i] is None or clouds_grid[i] < weather.CLOUD_BAD)
+        and (gust_by_hour.get(g.strftime("%Y-%m-%dT%H")) is None or gust_by_hour.get(g.strftime("%Y-%m-%dT%H")) < weather.STORM_GUST)
+        for i, g in enumerate(grid_local)
+    ]
+    moon = dict(moon)
+    moon["best_window"] = astro.best_night_window(moon.get("grid") or [], moon.get("track") or [], weather_ok)
 
     def _window(track: list[float]) -> dict | None:
         return astro.recommend_window(track, grid_labels, clouds_grid, min_altitude)
