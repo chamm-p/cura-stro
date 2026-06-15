@@ -80,6 +80,8 @@ class Settings(BaseSettings):
     llm_vision_model: str = Field(default="original/Qwen3.6")
     # Tägliche Aktualisierung der meteoblue-Wolken (Hintergrund-Scheduler).
     cloud_refresh_enabled: bool = Field(default=True)
+    # Feste Uhrzeit (lokale Zeit des Standorts) für den täglichen Refresh.
+    cloud_refresh_hour: int = Field(default=16, ge=0, le=23)
 
     # ─── MCP-Server (Phase 8) — Token für externen Zugriff (curai etc.) ───
     # Leer = MCP-Endpunkt deaktiviert.

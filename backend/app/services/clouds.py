@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
@@ -77,17 +78,42 @@ async def refresh_all() -> dict:
     return {"locations": len(locs) if cloud_vision.is_enabled() else 0, "hours": total}
 
 
+async def _refresh_tz() -> str:
+    """Zeitzone für den Refresh-Zeitpunkt: erster Standort mit meteoblue-URL."""
+    async with async_session() as db:
+        loc = await db.scalar(select(Location).where(Location.meteoblue_url.is_not(None)))
+        if loc and loc.timezone:
+            return loc.timezone
+    return "Europe/Zurich"
+
+
+def _seconds_until(hour: int, tzname: str) -> float:
+    tz = ZoneInfo(tzname or "UTC")
+    now = datetime.now(tz)
+    target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
 async def daily_refresh_loop():
-    """Hintergrund-Scheduler: beim Start (falls Cache fehlt/alt) + alle 24 h."""
+    """Hintergrund-Scheduler: einmal beim Start (frisch nach Deploy) und danach
+    täglich um ``cloud_refresh_hour`` (lokale Zeit, Default 16:00)."""
     if not (_cfg.cloud_refresh_enabled and cloud_vision.is_enabled()):
         logger.info("Wolken-Scheduler aus (deaktiviert oder kein LLM).")
         return
-    # Kurz warten, bis die App vollständig oben ist.
-    await asyncio.sleep(20)
+    await asyncio.sleep(20)  # bis die App vollständig oben ist
+    try:
+        logger.info("Wolken-Scheduler (Start): %s", await refresh_all())
+    except Exception:  # noqa: BLE001
+        logger.exception("Wolken-Scheduler-Startlauf fehlgeschlagen")
     while True:
+        tz = await _refresh_tz()
+        secs = _seconds_until(_cfg.cloud_refresh_hour, tz)
+        logger.info("Wolken-Scheduler: nächster Lauf in %.1f h (%02d:00 %s)",
+                    secs / 3600, _cfg.cloud_refresh_hour, tz)
+        await asyncio.sleep(secs)
         try:
-            res = await refresh_all()
-            logger.info("Wolken-Scheduler: %s", res)
+            logger.info("Wolken-Scheduler: %s", await refresh_all())
         except Exception:  # noqa: BLE001
             logger.exception("Wolken-Scheduler-Lauf fehlgeschlagen")
-        await asyncio.sleep(24 * 3600)
