@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -149,6 +149,12 @@ async def import_files(
 
     if filed:
         _bump_status(obs)
+        # Aufnahme-Datum = ältestes Sub-Datum (über alle Subs der Aufnahme).
+        oldest = await db.scalar(
+            select(func.min(SubFrame.captured_at)).where(SubFrame.observation_id == obs.id)
+        )
+        if oldest:
+            obs.planned_date = oldest.date()
     await db.flush()
     return {
         "filed": filed,

@@ -16,7 +16,6 @@ export default function AsiairImportModal({ onClose, onImported }: { onClose: ()
   const [scanning, setScanning] = useState(false)
   const [scan, setScan] = useState<ScanResult | null>(null)
   const [sel, setSel] = useState<Set<string>>(new Set())
-  const [cleanup, setCleanup] = useState(false)
   const [importing, setImporting] = useState(false)
   const [result, setResult] = useState<any | null>(null)
   const [err, setErr] = useState('')
@@ -47,7 +46,7 @@ export default function AsiairImportModal({ onClose, onImported }: { onClose: ()
   const doImport = async () => {
     setImporting(true); setErr(''); setResult(null)
     try {
-      const r = await api.post(`/api/asiair/rigs/${rigId}/import`, { objects: [...sel], cleanup })
+      const r = await api.post(`/api/asiair/rigs/${rigId}/import`, { objects: [...sel] })
       setResult(r.data); onImported()
     } catch (e: any) {
       setErr(e.response?.data?.detail || 'Import fehlgeschlagen.')
@@ -115,10 +114,7 @@ export default function AsiairImportModal({ onClose, onImported }: { onClose: ()
 
                 {scan.objects.length > 0 && (
                   <>
-                    <label className="mt-3 flex items-center gap-2 text-sm text-slate-300">
-                      <input type="checkbox" checked={cleanup} onChange={(e) => setCleanup(e.target.checked)} />
-                      Nach erfolgreichem Import auf der ASIAir aufräumen (nur verifizierte Subs)
-                    </label>
+                    <p className="mt-3 text-[11px] text-slate-500">Subs werden ins Archiv kopiert; auf der ASIAir wird beim Import <strong>nichts gelöscht</strong> (Aufräumen separat &amp; on-demand).</p>
                     <button onClick={doImport} disabled={importing || sel.size === 0 || (rig != null && !rig.telescope_id)}
                       className="mt-3 flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 px-4 py-2.5 text-sm font-medium text-white hover:from-indigo-400 hover:to-violet-500 disabled:opacity-40">
                       {importing ? <><Loader2 className="h-4 w-4 animate-spin" /> Importiere {sel.size} Objekt(e) …</> : <><Download className="h-4 w-4" /> {sel.size} Objekt(e) importieren</>}
@@ -130,7 +126,7 @@ export default function AsiairImportModal({ onClose, onImported }: { onClose: ()
 
             {result && (
               <div className="mt-4 rounded-xl border border-emerald-400/30 bg-emerald-500/10 p-3">
-                <div className="flex items-center gap-2 text-sm font-medium text-emerald-200"><CheckCircle2 className="h-4 w-4" /> {result.total_filed} Subs importiert{result.cleaned ? ` · ${result.cleaned} auf ASIAir aufgeräumt` : ''}</div>
+                <div className="flex items-center gap-2 text-sm font-medium text-emerald-200"><CheckCircle2 className="h-4 w-4" /> {result.total_filed} Subs importiert</div>
                 <div className="mt-2 space-y-0.5 text-xs text-slate-300">
                   {result.imported.map((i: any, idx: number) => (
                     <div key={idx} className="flex justify-between gap-2">

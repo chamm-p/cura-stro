@@ -248,7 +248,9 @@ async def _upsert_observation(db: AsyncSession, user: User, cat: CatalogObject |
 
 class ImportBody(BaseModel):
     objects: list[str] | None = None  # normalisierte Keys; None = alle
-    cleanup: bool = False             # nach Import verifizierte Subs auf ASIAir löschen
+    # Kein Auto-Cleanup beim Import! Subs auf der ASIAir werden NIE automatisch
+    # gelöscht — das passiert nur explizit/on-demand über /cleanup (nach
+    # Verifikation), damit ein abgebrochener Import nie Daten vernichtet.
 
 
 @router.post("/rigs/{rig_id}/import")
@@ -270,7 +272,6 @@ async def import_rig(
     selected = set(body.objects) if body.objects else None
 
     imported = []
-    cleaned = 0
     for key, g in groups.items():
         if selected is not None and key not in selected:
             continue
@@ -278,7 +279,6 @@ async def import_rig(
         obs = await _upsert_observation(db, user, match, g["object"], rig.telescope_id)
 
         filed = dup = err = 0
-        cleanup_paths: list[str] = []
         # In kleinen Häppchen lesen → Temp-Disk begrenzen.
         for i in range(0, len(g["files"]), 10):
             chunk = g["files"][i:i + 10]
@@ -296,21 +296,10 @@ async def import_rig(
                 filed += res["filed"]
                 dup += res["duplicates"]
                 err += res.get("errors", 0)
-                # Erfolgreich abgelegte (nicht-Dubletten) → Cleanup-Kandidaten.
-                done = {r["file"] for r in res["results"] if r["status"] == "filed"}
-                cleanup_paths += [f["path"] for f in chunk if f["name"] in done]
             for t in temps:
                 try:
                     os.unlink(t)
                 except OSError:
-                    pass
-
-        if body.cleanup and cleanup_paths:
-            for p in cleanup_paths:
-                try:
-                    await asyncio.to_thread(client.delete, p)
-                    cleaned += 1
-                except Exception:  # noqa: BLE001
                     pass
 
         imported.append({
@@ -318,8 +307,7 @@ async def import_rig(
             "filed": filed, "duplicates": dup, "errors": err,
         })
 
-    return {"imported": imported, "cleaned": cleaned,
-            "total_filed": sum(x["filed"] for x in imported)}
+    return {"imported": imported, "total_filed": sum(x["filed"] for x in imported)}
 
 
 class CleanupBody(BaseModel):
