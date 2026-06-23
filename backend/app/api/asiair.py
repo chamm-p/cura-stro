@@ -315,8 +315,9 @@ async def cleanup_rig(
 
 @router.get("/discover")
 async def discover(subnet: str = "192.168.0.0/24", user: User = Depends(get_current_user)):
+    """Findet echte ASIAirs im Subnetz (Port 4400 + Banner) inkl. Gerätename."""
     try:
-        hosts = await discovery.scan_subnet(subnet)
+        airs = await discovery.scan_subnet(subnet)
     except ValueError:
         raise HTTPException(400, "Ungültiges Subnetz (z. B. 192.168.0.0/24).")
-    return {"subnet": subnet, "hosts": hosts}
+    return {"subnet": subnet, "asiairs": airs}

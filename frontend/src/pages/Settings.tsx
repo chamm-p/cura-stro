@@ -443,7 +443,7 @@ function ArchiveTab() {
   const [form, setForm] = useState<{ name: string; host: string; share: string; telescope_id: string }>({ name: '', host: '', share: '', telescope_id: '' })
   const [subnet, setSubnet] = useState('192.168.0.0/24')
   const [discovering, setDiscovering] = useState(false)
-  const [hosts, setHosts] = useState<string[] | null>(null)
+  const [airs, setAirs] = useState<{ ip: string; name: string; version?: string }[] | null>(null)
 
   const loadRigs = () => api.get('/api/asiair/rigs').then((r) => setRigs(r.data))
   useEffect(() => {
@@ -493,11 +493,11 @@ function ArchiveTab() {
   }
 
   const discover = async () => {
-    setDiscovering(true); setHosts(null)
+    setDiscovering(true); setAirs(null)
     try {
       const r = await api.get('/api/asiair/discover', { params: { subnet } })
-      setHosts(r.data.hosts)
-    } catch { setHosts([]) } finally { setDiscovering(false) }
+      setAirs(r.data.asiairs)
+    } catch { setAirs([]) } finally { setDiscovering(false) }
   }
 
   if (!cfg) return <Loader2 className="h-5 w-5 animate-spin text-slate-400" />
@@ -591,13 +591,13 @@ function ArchiveTab() {
           <button onClick={discover} disabled={discovering} className={btnGhost}>
             {discovering ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />} ASIAirs suchen
           </button>
-          {hosts && hosts.map((h) => (
-            <button key={h} onClick={() => setForm({ ...form, host: h })}
-              className="rounded-full border border-indigo-400/30 bg-indigo-500/15 px-2.5 py-1 text-xs text-indigo-100 hover:bg-indigo-500/30" title="Als Host übernehmen">
-              {h}
+          {airs && airs.map((a) => (
+            <button key={a.ip} onClick={() => setForm({ ...form, host: a.ip, name: form.name || a.name })}
+              className="rounded-full border border-indigo-400/30 bg-indigo-500/15 px-2.5 py-1 text-xs text-indigo-100 hover:bg-indigo-500/30" title="Host (und Name) übernehmen">
+              {a.name} · {a.ip}
             </button>
           ))}
-          {hosts && hosts.length === 0 && <span className="text-xs text-slate-500">nichts gefunden</span>}
+          {airs && airs.length === 0 && <span className="text-xs text-slate-500">keine ASIAir gefunden</span>}
         </div>
         <p className="mt-1.5 text-[11px] text-slate-500">Eine ASIAir je Teleskop. „Freigabe" = SMB-Share der ASIAir, je nach Speicher: <span className="font-mono">EMMC Images</span> (intern), <span className="font-mono">Udisk Images</span> (USB) oder <span className="font-mono">TF Images</span> (SD-Karte). Die Suche listet SMB-Hosts im Subnetz — passenden anklicken füllt den Host. Zugriff per Gast (kein Passwort).</p>
       </div>

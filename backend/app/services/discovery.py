@@ -1,48 +1,51 @@
-"""Netzwerk-Discovery (V2 Phase B2) — ASIAirs (SMB) im LAN finden.
+"""ASIAir-Discovery im LAN (V2 Phase B2).
 
-Einfacher TCP-Connect-Sweep auf Port 445 über ein Subnetz. Aus dem Container
-heraus erreichbar (ausgehende Verbindungen ins LAN). Liefert offene Hosts; die
-Identifikation (welcher ist die ASIAir) trifft der Nutzer per Dropdown.
+Echte ASIAirs identifizieren wir über ihren **Steuerport 4400**: beim Verbinden
+sendet die ASIAir sofort einen Banner
+``{"Event":"Version","name":"<Gerätename>","svr_ver_string":...}``. Damit
+filtern wir Nicht-ASIAirs (NAS etc.) heraus UND lesen gleich den Gerätenamen.
 """
 
 from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
+
+ASIAIR_PORT = 4400
 
 
-# SMB hört auf 445 (direct host) und/oder 139 (NetBIOS) — ASIAirs teils nur 139.
-SMB_PORTS = (445, 139)
-
-
-async def _one(ip: str, port: int, timeout: float) -> bool:
+async def asiair_info(ip: str, timeout: float = 1.2) -> dict | None:
+    """Verbindet auf 4400, liest den Version-Banner → {ip, name, version}.
+    ``None``, wenn der Port zu ist oder kein ASIAir-Banner kommt."""
+    writer = None
     try:
-        fut = asyncio.open_connection(ip, port)
-        _reader, writer = await asyncio.wait_for(fut, timeout)
-        writer.close()
-        try:
-            await asyncio.wait_for(writer.wait_closed(), 0.3)
-        except Exception:  # noqa: BLE001
-            pass
-        return True
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(ip, ASIAIR_PORT), timeout)
+        line = await asyncio.wait_for(reader.readline(), timeout)
+        info = json.loads(line.decode(errors="ignore") or "{}")
+        name = info.get("name")
+        if not name:
+            return None  # Port offen, aber kein ASIAir-Banner
+        return {"ip": ip, "name": name, "version": info.get("svr_ver_string")}
     except Exception:  # noqa: BLE001
-        return False
+        return None
+    finally:
+        if writer is not None:
+            writer.close()
+            try:
+                await asyncio.wait_for(writer.wait_closed(), 0.3)
+            except Exception:  # noqa: BLE001
+                pass
 
 
-async def _check(ip: str, ports: tuple[int, ...], timeout: float) -> str | None:
-    for port in ports:
-        if await _one(ip, port, timeout):
-            return ip
-    return None
-
-
-async def scan_subnet(subnet: str, ports: tuple[int, ...] = SMB_PORTS, timeout: float = 0.8, limit: int = 512) -> list[str]:
+async def scan_subnet(subnet: str, timeout: float = 1.2, limit: int = 512) -> list[dict]:
+    """Scannt das Subnetz nach ASIAirs (Port 4400 + Banner). Liefert
+    [{ip, name, version}] — nur echte ASIAirs."""
     net = ipaddress.ip_network(subnet, strict=False)
     hosts = [str(ip) for ip in list(net.hosts())[:limit]]
-    # In Häppchen, um nicht zu viele Sockets gleichzeitig zu öffnen.
-    open_hosts: list[str] = []
+    found: list[dict] = []
     for i in range(0, len(hosts), 128):
         batch = hosts[i:i + 128]
-        results = await asyncio.gather(*[_check(h, ports, timeout) for h in batch])
-        open_hosts.extend([r for r in results if r])
-    return open_hosts
+        results = await asyncio.gather(*[asiair_info(h, timeout) for h in batch])
+        found.extend([r for r in results if r])
+    return found
