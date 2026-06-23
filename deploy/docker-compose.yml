@@ -4,6 +4,9 @@
 #   cp .env.example .env   # dann anpassen
 #   docker compose up -d --build
 
+# Projekt-/Gruppenname (sonst = Ordnername "deploy").
+name: curastro
+
 services:
   db:
     image: postgres:16-alpine
@@ -76,13 +79,17 @@ services:
     networks: [curastro-net]
 
 volumes:
+  # name: auf die bisherigen Volumes gepinnt, damit die Projekt-Umbenennung
+  # (deploy → curastro) KEINE Daten verliert (DB/Archiv bleiben erhalten).
   pgdata:
+    name: deploy_pgdata
   outputs:
-  # Foto-Archiv unter /archive. Standard: lokales Volume → der Stack bootet
-  # IMMER, auch ohne NAS-Konfig. Für den echten NAS das Overlay
-  # docker-compose.nas.yml zuschalten (CIFS, NAS_* in .env — siehe
-  # .env.example) ODER ARCHIVE_PATH=/host/pfad als Bind setzen.
+    name: deploy_outputs
+  # Foto-Archiv unter /archive (lokales Volume, Fallback ohne NAS). Der NAS
+  # wird zur Laufzeit direkt per SMB aus der App angesprochen (Einstellungen →
+  # Archiv & ASIAir), kein OS-Mount.
   archivedata:
+    name: deploy_archivedata
 
 networks:
   curastro-net:
