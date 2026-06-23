@@ -248,9 +248,10 @@ async def _upsert_observation(db: AsyncSession, user: User, cat: CatalogObject |
 
 class ImportBody(BaseModel):
     objects: list[str] | None = None  # normalisierte Keys; None = alle
-    # Kein Auto-Cleanup beim Import! Subs auf der ASIAir werden NIE automatisch
-    # gelöscht — das passiert nur explizit/on-demand über /cleanup (nach
-    # Verifikation), damit ein abgebrochener Import nie Daten vernichtet.
+    # Auto-Cleanup: löscht Subs auf der ASIAir NUR, wenn das jeweilige Objekt
+    # zu 100 % fehlerfrei importiert wurde UND jede Datei nachweislich im
+    # Archiv liegt (Existenz-Recheck). Bei Fehlern → kein Löschen.
+    cleanup: bool = False
 
 
 @router.post("/rigs/{rig_id}/import")
@@ -271,17 +272,23 @@ async def import_rig(
     groups = _group(files)
     selected = set(body.objects) if body.objects else None
 
+    storage = archive.get_storage(user)
     imported = []
+    cleaned = 0
     for key, g in groups.items():
         if selected is not None and key not in selected:
             continue
         match = cat.get(key)
         obs = await _upsert_observation(db, user, match, g["object"], rig.telescope_id)
+        base = archive.reldir(archive.folder_name(user, "RAW"),
+                              await archive.object_label(db, obs), await archive.device_label(db, obs))
 
         filed = dup = err = 0
+        candidates: list[tuple[str, str]] = []  # (rel im Archiv, Quellpfad auf ASIAir)
         # In kleinen Häppchen lesen → Temp-Disk begrenzen.
         for i in range(0, len(g["files"]), 10):
             chunk = g["files"][i:i + 10]
+            name_to_src = {f["name"]: f["path"] for f in chunk}
             items, temps = [], []
             for f in chunk:
                 try:
@@ -296,18 +303,34 @@ async def import_rig(
                 filed += res["filed"]
                 dup += res["duplicates"]
                 err += res.get("errors", 0)
+                # Im Archiv gelandet (filed) ODER schon dort (duplicate) → löschbar.
+                for r in res["results"]:
+                    if r["status"] in ("filed", "duplicate") and r["file"] in name_to_src:
+                        candidates.append((f"{base}/{r['file']}", name_to_src[r["file"]]))
             for t in temps:
                 try:
                     os.unlink(t)
                 except OSError:
                     pass
 
+        # Auto-Cleanup nur bei 100 % (kein Fehler) + Existenz-Recheck im Archiv.
+        if body.cleanup and err == 0:
+            for rel, src in candidates:
+                try:
+                    if await asyncio.to_thread(storage.exists, rel):
+                        await asyncio.to_thread(client.delete, src)
+                        cleaned += 1
+                except Exception:  # noqa: BLE001
+                    pass
+
         imported.append({
             "object": g["object"], "matched_ident": match.ident if match else None,
             "filed": filed, "duplicates": dup, "errors": err,
+            "cleaned_eligible": err == 0,
         })
 
-    return {"imported": imported, "total_filed": sum(x["filed"] for x in imported)}
+    return {"imported": imported, "cleaned": cleaned,
+            "total_filed": sum(x["filed"] for x in imported)}
 
 
 class CleanupBody(BaseModel):
