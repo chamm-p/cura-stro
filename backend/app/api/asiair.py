@@ -26,7 +26,7 @@ from app.schemas.asiair import RigCreate, RigOut, RigUpdate
 from app.services import archive
 from app.services import asiair as asi
 from app.services import discovery
-from app.services.asiair_smb import AsiairClient, AsiairError, read_marker, write_marker
+from app.services.asiair_smb import AsiairClient, AsiairError, detect_share, read_marker, write_marker
 
 router = APIRouter(prefix="/api/asiair", tags=["asiair"])
 _settings = get_settings()
@@ -109,8 +109,14 @@ async def list_rigs(user: User = Depends(get_current_user), db: AsyncSession = D
 async def create_rig(body: RigCreate, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     scope_id = await _uuid_or_none(body.telescope_id)
     scope = await _scope(db, user, scope_id)
+    share = body.share or None
+    if not share and body.host:  # Freigabe automatisch erkennen
+        try:
+            share = await asyncio.to_thread(detect_share, body.host)
+        except Exception:  # noqa: BLE001
+            share = None
     r = AsiairRig(
-        user_id=user.id, name=body.name, host=body.host or None, share=body.share or None,
+        user_id=user.id, name=body.name, host=body.host or None, share=share,
         telescope_id=scope_id, marker_id=uuid.uuid4().hex,
     )
     db.add(r)
@@ -142,6 +148,11 @@ async def update_rig(
             setattr(r, k, data[k] or None if k != "name" else data[k])
     if not r.marker_id:
         r.marker_id = uuid.uuid4().hex
+    if r.host and not r.share:  # Freigabe automatisch erkennen
+        try:
+            r.share = await asyncio.to_thread(detect_share, r.host)
+        except Exception:  # noqa: BLE001
+            pass
     await db.flush()
     await _write_marker(r)  # Marker aktualisieren (Name/Kennung) — best-effort
     scope = await db.get(Telescope, r.telescope_id) if r.telescope_id else None

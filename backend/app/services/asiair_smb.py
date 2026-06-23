@@ -45,6 +45,33 @@ def write_marker(host: str, share: str, payload: dict) -> None:
         f.write(json.dumps(payload))
 
 
+STD_SHARES = ["EMMC Images", "Udisk Images", "TF Images"]
+
+
+def detect_share(host: str) -> str | None:
+    """Passende ASIAir-Freigabe finden: bevorzugt die mit ``Autorun``-Ordner
+    (dort liegen die Lights), sonst die erste auflistbare. ``None`` bei keiner."""
+    import smbclient
+    import smbclient.path as smbpath
+    try:
+        _guest_session(host)
+    except Exception:  # noqa: BLE001
+        return None
+    for sh in STD_SHARES:
+        try:
+            if smbpath.exists(rf"\\{host}\{sh}\Autorun"):
+                return sh
+        except Exception:  # noqa: BLE001
+            continue
+    for sh in STD_SHARES:
+        try:
+            smbclient.listdir(rf"\\{host}\{sh}")
+            return sh
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
 def read_marker(host: str, share: str) -> dict | None:
     """Marker-Datei lesen → dict oder None (blockierend, fehlertolerant)."""
     import smbclient
