@@ -93,7 +93,7 @@ export default function Manage() {
   const counts = STATUS.map((s) => ({ ...s, n: rows.filter((r) => r.status === s.v).length }))
 
   return (
-    <Layout>
+    <Layout wide>
       <div className="flex items-center gap-2">
         <ListChecks className="h-6 w-6 text-indigo-300" />
         <h1 className="text-2xl font-bold">Verwaltung</h1>

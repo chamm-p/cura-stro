@@ -10,7 +10,7 @@ const NAV = [
   { to: '/settings', label: 'Einstellungen', icon: SettingsIcon },
 ]
 
-export default function Layout({ children }: { children: React.ReactNode }) {
+export default function Layout({ children, wide = false }: { children: React.ReactNode; wide?: boolean }) {
   const { user, logout } = useAuthStore()
   const { pathname } = useLocation()
 
@@ -55,7 +55,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           </button>
         </div>
       </header>
-      <main className="relative z-10 mx-auto max-w-5xl px-6 py-10">{children}</main>
+      <main className={`relative z-10 mx-auto ${wide ? 'max-w-screen-2xl' : 'max-w-5xl'} px-6 py-10`}>{children}</main>
     </div>
   )
 }
