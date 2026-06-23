@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { X, Upload, Trash2, Loader2, Layers, CheckCircle2, AlertTriangle, ChevronLeft, ChevronRight, Eye } from 'lucide-react'
 import api from '../services/api'
-import AuthImage from './AuthImage'
+import { useAuthStore } from '../store/auth'
 
 interface Frame {
   id: string; filename: string; frame_type: string; filter: string | null
@@ -29,7 +29,43 @@ export default function SubsModal({
   const [dragOver, setDragOver] = useState(false)
   const [showFrames, setShowFrames] = useState(false)
   const [viewIdx, setViewIdx] = useState<number | null>(null)
+  const [shownUrl, setShownUrl] = useState<string | null>(null)
+  const [vLoading, setVLoading] = useState(false)
+  const blobCache = useRef<Map<string, string>>(new Map())
+  const curId = useRef<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+
+  // Vorschau-JPG (auth) holen + als Blob-URL cachen.
+  const loadPreview = useCallback(async (frameId: string): Promise<string | null> => {
+    const hit = blobCache.current.get(frameId)
+    if (hit) return hit
+    const token = useAuthStore.getState().token || localStorage.getItem('auth-token')
+    try {
+      const r = await fetch(`/api/observations/${observationId}/subframes/${frameId}/preview`, { headers: { Authorization: `Bearer ${token}` } })
+      if (!r.ok) return null
+      const url = URL.createObjectURL(await r.blob())
+      blobCache.current.set(frameId, url)
+      return url
+    } catch { return null }
+  }, [observationId])
+
+  // Beim Blättern: gecachtes sofort zeigen, sonst altes Bild stehen lassen +
+  // im Hintergrund laden; Nachbarn vorausladen (Daumenkino ohne Schwarz).
+  useEffect(() => {
+    if (viewIdx === null) return
+    const fr = frames[viewIdx]
+    if (!fr) return
+    curId.current = fr.id
+    const hit = blobCache.current.get(fr.id)
+    if (hit) { setShownUrl(hit); setVLoading(false) } else { setVLoading(true) }
+    loadPreview(fr.id).then((url) => {
+      if (url && curId.current === fr.id) { setShownUrl(url); setVLoading(false) }
+    })
+    ;[viewIdx + 1, viewIdx - 1, viewIdx + 2].forEach((j) => { if (frames[j]) loadPreview(frames[j].id) })
+  }, [viewIdx, frames, loadPreview])
+
+  // Blob-URLs beim Schließen freigeben.
+  useEffect(() => () => { blobCache.current.forEach((u) => URL.revokeObjectURL(u)); blobCache.current.clear() }, [])
 
   const load = useCallback(() => {
     setLoading(true)
@@ -165,8 +201,12 @@ export default function SubsModal({
         <div className="relative flex flex-1 items-center justify-center overflow-hidden" onClick={(e) => e.stopPropagation()}>
           <button onClick={() => setViewIdx((i) => (i === null ? i : Math.max(0, i - 1)))} disabled={viewIdx === 0}
             className="absolute left-2 z-10 rounded-full bg-white/10 p-2 text-white hover:bg-white/20 disabled:opacity-30"><ChevronLeft className="h-6 w-6" /></button>
-          <AuthImage key={frames[viewIdx].id} src={`/api/observations/${observationId}/subframes/${frames[viewIdx].id}/preview`}
-            alt={frames[viewIdx].filename} className="max-h-full max-w-full object-contain" />
+          {shownUrl && <img src={shownUrl} alt={frames[viewIdx].filename} className="max-h-full max-w-full object-contain" />}
+          {vLoading && (
+            <div className="absolute right-3 top-3 flex items-center gap-1 rounded bg-black/60 px-2 py-1 text-[11px] text-slate-300">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" /> lädt …
+            </div>
+          )}
           <div className="pointer-events-none absolute bottom-3 left-3 max-w-[80%] truncate rounded bg-black/55 px-2 py-1 text-xs text-slate-100">
             {frames[viewIdx].filename}
           </div>

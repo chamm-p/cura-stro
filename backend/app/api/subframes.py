@@ -32,6 +32,15 @@ _PREVIEW_DIR = Path(settings.outputs_dir) / "subprev"
 _ALLOWED = {".fit", ".fits", ".fts", ".xisf"}
 
 
+def _shrink(path: str, maxside: int = 1400) -> None:
+    """Vorschau-JPG auf max. Kantenlänge verkleinern (schnelles Blättern)."""
+    from PIL import Image
+    im = Image.open(path)
+    if max(im.size) > maxside:
+        im.thumbnail((maxside, maxside))
+        im.convert("L" if im.mode in ("L", "I", "I;16") else "RGB").save(path, "JPEG", quality=85)
+
+
 async def _owned_observation(db: AsyncSession, user: User, obs_id: str) -> Observation:
     try:
         o = await db.scalar(
@@ -135,6 +144,7 @@ async def subframe_preview(
     try:
         await asyncio.to_thread(storage.fetch, rel, tmp)
         await asyncio.to_thread(image_processing.process, tmp, fmt, str(cache))
+        await asyncio.to_thread(_shrink, str(cache))  # kleinere JPGs → flüssiges Blättern
     except Exception as e:  # noqa: BLE001
         raise HTTPException(422, f"Vorschau fehlgeschlagen: {e}")
     finally:
