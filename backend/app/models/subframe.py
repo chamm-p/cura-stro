@@ -63,5 +63,7 @@ class SubFrame(Base):
     # Herkunft: "asiair" | "upload".
     source: Mapped[str | None] = mapped_column(String(16), nullable=True)
     verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Qualitäts-Flag aus der Sichtung: "ok" | "nok" (Problem) | NULL (ungesichtet).
+    quality: Mapped[str | None] = mapped_column(String(8), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

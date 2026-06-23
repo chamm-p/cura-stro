@@ -59,6 +59,7 @@ def _frame_out(s: SubFrame) -> dict:
         "filter": s.filter_name, "exposure_s": s.exposure_s, "binning": s.binning,
         "captured_at": s.captured_at.isoformat() if s.captured_at else None,
         "sequence": s.sequence, "verified": s.verified, "source": s.source,
+        "quality": s.quality,
     }
 
 
@@ -153,6 +154,27 @@ async def subframe_preview(
         except OSError:
             pass
     return FileResponse(cache, media_type="image/jpeg")
+
+
+@router.patch("/api/observations/{obs_id}/subframes/{sub_id}")
+async def patch_subframe(
+    obs_id: str, sub_id: str, body: dict, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    """Qualitäts-Flag setzen: quality ∈ {"ok","nok"} oder null (zurücksetzen)."""
+    obs = await _owned_observation(db, user, obs_id)
+    try:
+        s = await db.scalar(select(SubFrame).where(SubFrame.id == uuid.UUID(sub_id), SubFrame.observation_id == obs.id))
+    except ValueError:
+        s = None
+    if not s:
+        raise HTTPException(404, "Sub nicht gefunden")
+    if "quality" in body:
+        q = body.get("quality")
+        if q not in (None, "ok", "nok"):
+            raise HTTPException(400, "quality muss 'ok', 'nok' oder null sein")
+        s.quality = q
+    await db.flush()
+    return _frame_out(s)
 
 
 @router.delete("/api/observations/{obs_id}/subframes/{sub_id}", status_code=204)
