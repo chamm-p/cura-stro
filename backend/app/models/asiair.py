@@ -30,6 +30,9 @@ class AsiairRig(Base):
     host: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # SMB-Freigabe-/Unterpfad auf der ASIAir (Default wird in Phase B genutzt).
     share: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Stabile Kennung: wird als Marker-Datei (.curastro-rig.json) auf die
+    # ASIAir-Freigabe geschrieben → Wiedererkennung trotz IP-Wechsel.
+    marker_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     # Zugeordnetes Teleskop → bestimmt den <Gerät>-Ordner im Archiv.
     telescope_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("telescopes.id", ondelete="SET NULL"), nullable=True

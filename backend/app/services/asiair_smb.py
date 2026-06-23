@@ -11,14 +11,50 @@ Alle Methoden sind blockierend (smbclient); Aufrufer wrappen via
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 
 from app.services import asiair as asi
 
+# Marker-Datei im Wurzelverzeichnis der Freigabe → Wiedererkennung trotz
+# IP-Wechsel. (Löschen unterstützt die ASIAir-Samba per Gast nicht, daher
+# wird der Marker immer überschrieben, nie entfernt.)
+MARKER_NAME = ".curastro-rig.json"
+
 
 class AsiairError(Exception):
     pass
+
+
+def _guest_session(host: str):
+    import smbclient
+    smbclient.ClientConfig(require_secure_negotiate=False)
+    smbclient.register_session(host, username="guest", password="", require_signing=False)
+
+
+def _marker_unc(host: str, share: str) -> str:
+    return rf"\\{host}\{(share or '').strip('/\\')}\{MARKER_NAME}"
+
+
+def write_marker(host: str, share: str, payload: dict) -> None:
+    """Marker-Datei auf die Freigabe schreiben/überschreiben (blockierend)."""
+    import smbclient
+    _guest_session(host)
+    with smbclient.open_file(_marker_unc(host, share), mode="w") as f:
+        f.write(json.dumps(payload))
+
+
+def read_marker(host: str, share: str) -> dict | None:
+    """Marker-Datei lesen → dict oder None (blockierend, fehlertolerant)."""
+    import smbclient
+    try:
+        _guest_session(host)
+        with smbclient.open_file(_marker_unc(host, share), mode="r") as f:
+            data = f.read()
+        return json.loads(data) if data and data.strip() and data.strip() != "{}" else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 class AsiairClient:

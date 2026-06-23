@@ -26,7 +26,7 @@ from app.schemas.asiair import RigCreate, RigOut, RigUpdate
 from app.services import archive
 from app.services import asiair as asi
 from app.services import discovery
-from app.services.asiair_smb import AsiairClient, AsiairError
+from app.services.asiair_smb import AsiairClient, AsiairError, read_marker, write_marker
 
 router = APIRouter(prefix="/api/asiair", tags=["asiair"])
 _settings = get_settings()
@@ -41,7 +41,43 @@ def _out(r: AsiairRig, scope: Telescope | None) -> RigOut:
         share=r.share,
         telescope_id=str(r.telescope_id) if r.telescope_id else None,
         telescope_name=scope.name if scope else None,
+        marker_id=r.marker_id,
     )
+
+
+async def _write_marker(rig: AsiairRig) -> None:
+    """Marker-Datei (Rig-Kennung + Name) best-effort auf die Freigabe schreiben."""
+    if not (rig.host and rig.share and rig.marker_id):
+        return
+    try:
+        await asyncio.to_thread(write_marker, rig.host, rig.share,
+                                {"id": rig.marker_id, "name": rig.name, "app": "cura-stro"})
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _subnet_of(host: str | None) -> str:
+    if host and host.count(".") == 3:
+        a, b, c, _ = host.split(".")
+        return f"{a}.{b}.{c}.0/24"
+    return "192.168.0.0/24"
+
+
+async def _live_host(db: AsyncSession, rig: AsiairRig) -> str:
+    """Aktuelle IP der ASIAir ermitteln — bei IP-Wechsel per Marker wiederfinden.
+    Aktualisiert rig.host, wenn die ASIAir an neuer IP gefunden wurde."""
+    if rig.host and await discovery.asiair_info(rig.host):
+        return rig.host  # gespeicherte IP erreichbar
+    if not (rig.marker_id and rig.share):
+        return rig.host or ""
+    for a in await discovery.scan_subnet(_subnet_of(rig.host)):
+        m = await asyncio.to_thread(read_marker, a["ip"], rig.share)
+        if m and m.get("id") == rig.marker_id:
+            if a["ip"] != rig.host:
+                rig.host = a["ip"]
+                await db.flush()
+            return a["ip"]
+    return rig.host or ""
 
 
 async def _uuid_or_none(val: str | None) -> uuid.UUID | None:
@@ -73,9 +109,13 @@ async def list_rigs(user: User = Depends(get_current_user), db: AsyncSession = D
 async def create_rig(body: RigCreate, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     scope_id = await _uuid_or_none(body.telescope_id)
     scope = await _scope(db, user, scope_id)
-    r = AsiairRig(user_id=user.id, name=body.name, host=body.host or None, share=body.share or None, telescope_id=scope_id)
+    r = AsiairRig(
+        user_id=user.id, name=body.name, host=body.host or None, share=body.share or None,
+        telescope_id=scope_id, marker_id=uuid.uuid4().hex,
+    )
     db.add(r)
     await db.flush()
+    await _write_marker(r)  # Marker auf die ASIAir schreiben (best-effort)
     return _out(r, scope)
 
 
@@ -100,7 +140,10 @@ async def update_rig(
     for k in ("name", "host", "share"):
         if k in data:
             setattr(r, k, data[k] or None if k != "name" else data[k])
+    if not r.marker_id:
+        r.marker_id = uuid.uuid4().hex
     await db.flush()
+    await _write_marker(r)  # Marker aktualisieren (Name/Kennung) — best-effort
     scope = await db.get(Telescope, r.telescope_id) if r.telescope_id else None
     return _out(r, scope)
 
@@ -149,6 +192,7 @@ def _group(files: list[dict]) -> dict[str, dict]:
 @router.get("/rigs/{rig_id}/scan")
 async def scan_rig(rig_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     rig = await _owned(db, user, rig_id)
+    await _live_host(db, rig)  # IP per Marker auffrischen (falls gewechselt)
     client = _client(rig)
     try:
         files = await asyncio.to_thread(client.scan)
@@ -203,6 +247,7 @@ async def import_rig(
     rig = await _owned(db, user, rig_id)
     if not rig.telescope_id:
         raise HTTPException(400, "Diesem ASIAir ist kein Teleskop zugeordnet — in den Einstellungen setzen.")
+    await _live_host(db, rig)  # IP per Marker auffrischen (falls gewechselt)
     client = _client(rig)
     try:
         files = await asyncio.to_thread(client.scan)
@@ -313,11 +358,34 @@ async def cleanup_rig(
     return {"deleted": deleted, "errors": errors, "candidates": len(subs)}
 
 
+_STD_SHARES = ["EMMC Images", "Udisk Images", "TF Images"]
+
+
 @router.get("/discover")
-async def discover(subnet: str = "192.168.0.0/24", user: User = Depends(get_current_user)):
-    """Findet echte ASIAirs im Subnetz (Port 4400 + Banner) inkl. Gerätename."""
+async def discover(
+    subnet: str = "192.168.0.0/24",
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Findet echte ASIAirs im Subnetz (Port 4400 + Banner) inkl. Gerätename.
+    Liest zusätzlich die Marker-Datei → zeigt registrierte ASIAirs unter ihrem
+    Rig-Namen (IP-unabhängig)."""
     try:
         airs = await discovery.scan_subnet(subnet)
     except ValueError:
         raise HTTPException(400, "Ungültiges Subnetz (z. B. 192.168.0.0/24).")
+    rigs = {r.marker_id: r for r in await db.scalars(
+        select(AsiairRig).where(AsiairRig.user_id == user.id)) if r.marker_id}
+    for a in airs:
+        for sh in _STD_SHARES:
+            m = await asyncio.to_thread(read_marker, a["ip"], sh)
+            if m and m.get("id"):
+                a["marker_id"] = m["id"]
+                a["marker_name"] = m.get("name")
+                a["share"] = sh
+                rig = rigs.get(m["id"])
+                if rig:
+                    a["registered_rig_id"] = str(rig.id)
+                    a["registered_rig_name"] = rig.name
+                break
     return {"subnet": subnet, "asiairs": airs}

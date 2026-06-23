@@ -24,3 +24,4 @@ class RigUpdate(BaseModel):
 class RigOut(RigBase):
     id: str
     telescope_name: str | None = None
+    marker_id: str | None = None
