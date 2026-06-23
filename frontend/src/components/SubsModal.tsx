@@ -167,6 +167,9 @@ export default function SubsModal({
             className="absolute left-2 z-10 rounded-full bg-white/10 p-2 text-white hover:bg-white/20 disabled:opacity-30"><ChevronLeft className="h-6 w-6" /></button>
           <AuthImage key={frames[viewIdx].id} src={`/api/observations/${observationId}/subframes/${frames[viewIdx].id}/preview`}
             alt={frames[viewIdx].filename} className="max-h-full max-w-full object-contain" />
+          <div className="pointer-events-none absolute bottom-3 left-3 max-w-[80%] truncate rounded bg-black/55 px-2 py-1 text-xs text-slate-100">
+            {frames[viewIdx].filename}
+          </div>
           <button onClick={() => setViewIdx((i) => (i === null ? i : Math.min(frames.length - 1, i + 1)))} disabled={viewIdx === frames.length - 1}
             className="absolute right-2 z-10 rounded-full bg-white/10 p-2 text-white hover:bg-white/20 disabled:opacity-30"><ChevronRight className="h-6 w-6" /></button>
         </div>

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { X, Radio, Loader2, Download, CheckCircle2, AlertTriangle, Search } from 'lucide-react'
 import api from '../services/api'
+import { useAuthStore } from '../store/auth'
 
 interface Rig { id: string; name: string; host?: string | null; share?: string | null; telescope_id?: string | null; telescope_name?: string | null }
 interface FilterAgg { filter: string; subs: number }
@@ -18,6 +19,7 @@ export default function AsiairImportModal({ onClose, onImported }: { onClose: ()
   const [sel, setSel] = useState<Set<string>>(new Set())
   const [cleanup, setCleanup] = useState(false)
   const [importing, setImporting] = useState(false)
+  const [progress, setProgress] = useState<{ phase: string; done?: number; total?: number; object?: string } | null>(null)
   const [result, setResult] = useState<any | null>(null)
   const [err, setErr] = useState('')
 
@@ -45,13 +47,37 @@ export default function AsiairImportModal({ onClose, onImported }: { onClose: ()
   const toggle = (k: string) => setSel((s) => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n })
 
   const doImport = async () => {
-    setImporting(true); setErr(''); setResult(null)
+    setImporting(true); setErr(''); setResult(null); setProgress({ phase: 'scan' })
+    const token = useAuthStore.getState().token || localStorage.getItem('auth-token')
     try {
-      const r = await api.post(`/api/asiair/rigs/${rigId}/import`, { objects: [...sel], cleanup })
-      setResult(r.data); onImported()
+      const resp = await fetch(`/api/asiair/rigs/${rigId}/import`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ objects: [...sel], cleanup }),
+      })
+      if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status)
+      const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = ''
+      for (;;) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buf += dec.decode(value, { stream: true })
+        let nl
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1)
+          if (!line) continue
+          let e: any
+          try { e = JSON.parse(line) } catch { continue }
+          if (e.type === 'scanning') setProgress({ phase: 'scan' })
+          else if (e.type === 'scanned') setProgress({ phase: 'import', done: 0, total: e.files })
+          else if (e.type === 'object') setProgress((p) => ({ ...(p || { phase: 'import' }), object: e.object }))
+          else if (e.type === 'progress') setProgress({ phase: 'import', done: e.done, total: e.total, object: e.object })
+          else if (e.type === 'error') setErr(e.message)
+          else if (e.type === 'done') { setResult(e); onImported() }
+        }
+      }
     } catch (e: any) {
-      setErr(e.response?.data?.detail || 'Import fehlgeschlagen.')
-    } finally { setImporting(false) }
+      setErr('Import fehlgeschlagen' + (e?.message ? ` (${e.message})` : '') + '.')
+    } finally { setImporting(false); setProgress(null) }
   }
 
   return (
@@ -121,8 +147,26 @@ export default function AsiairImportModal({ onClose, onImported }: { onClose: ()
                     </label>
                     <button onClick={doImport} disabled={importing || sel.size === 0 || (rig != null && !rig.telescope_id)}
                       className="mt-3 flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 px-4 py-2.5 text-sm font-medium text-white hover:from-indigo-400 hover:to-violet-500 disabled:opacity-40">
-                      {importing ? <><Loader2 className="h-4 w-4 animate-spin" /> Importiere {sel.size} Objekt(e) …</> : <><Download className="h-4 w-4" /> {sel.size} Objekt(e) importieren</>}
+                      {importing ? <><Loader2 className="h-4 w-4 animate-spin" /> Importiere …</> : <><Download className="h-4 w-4" /> {sel.size} Objekt(e) importieren</>}
                     </button>
+                    {importing && progress && (
+                      <div className="mt-3">
+                        {progress.phase === 'scan' ? (
+                          <div className="flex items-center gap-2 text-xs text-slate-400"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Scanne ASIAir …</div>
+                        ) : (
+                          <>
+                            <div className="mb-1 flex justify-between text-[11px] text-slate-400">
+                              <span className="truncate">{progress.object || '…'}</span>
+                              <span>{progress.done ?? 0}/{progress.total ?? 0} Subs</span>
+                            </div>
+                            <div className="h-2 w-full overflow-hidden rounded-full bg-white/10">
+                              <div className="h-full bg-indigo-500 transition-all"
+                                style={{ width: `${progress.total ? Math.round(((progress.done || 0) / progress.total) * 100) : 0}%` }} />
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    )}
                   </>
                 )}
               </div>

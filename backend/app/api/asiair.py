@@ -5,17 +5,19 @@ Eine ASIAir je Gerät: das Mapping liefert den ``<Gerät>``-Ordner beim Import
 """
 
 import asyncio
+import json
 import os
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.config import get_settings
-from app.database import get_db
+from app.database import async_session, get_db
 from app.models.asiair import AsiairRig
 from app.models.catalog import CatalogObject
 from app.models.observation import Observation
@@ -258,79 +260,94 @@ class ImportBody(BaseModel):
 async def import_rig(
     rig_id: str, body: ImportBody, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
+    """Streamt den Importfortschritt als ndjson (Events: scanning/scanned/
+    object/progress/done/error), damit das UI live anzeigen kann."""
     rig = await _owned(db, user, rig_id)
     if not rig.telescope_id:
         raise HTTPException(400, "Diesem ASIAir ist kein Teleskop zugeordnet — in den Einstellungen setzen.")
     await _live_host(db, rig)  # IP per Marker auffrischen (falls gewechselt)
-    client = _client(rig)
-    try:
-        files = await asyncio.to_thread(client.scan)
-    except AsiairError as e:
-        raise HTTPException(502, str(e))
-
-    cat = await _catalog_map(db)
-    groups = _group(files)
+    await db.commit()
+    uid, rid = user.id, rig.id
     selected = set(body.objects) if body.objects else None
+    do_cleanup = body.cleanup
 
-    storage = archive.get_storage(user)
-    imported = []
-    cleaned = 0
-    for key, g in groups.items():
-        if selected is not None and key not in selected:
-            continue
-        match = cat.get(key)
-        obs = await _upsert_observation(db, user, match, g["object"], rig.telescope_id)
-        base = archive.reldir(archive.folder_name(user, "RAW"),
-                              await archive.object_label(db, obs), await archive.device_label(db, obs))
+    async def gen():
+        def ev(d: dict) -> str:
+            return json.dumps(d) + "\n"
 
-        filed = dup = err = 0
-        candidates: list[tuple[str, str]] = []  # (rel im Archiv, Quellpfad auf ASIAir)
-        # In kleinen Häppchen lesen → Temp-Disk begrenzen.
-        for i in range(0, len(g["files"]), 10):
-            chunk = g["files"][i:i + 10]
-            name_to_src = {f["name"]: f["path"] for f in chunk}
-            items, temps = [], []
-            for f in chunk:
-                try:
-                    tmp, _sz = await asyncio.to_thread(client.read_to_temp, f["path"], _TMP)
-                except Exception:  # noqa: BLE001
-                    err += 1
-                    continue
-                items.append((f["name"], tmp, f["path"]))
-                temps.append(tmp)
-            if items:
-                res = await archive.import_files(db, user, obs, items, source="asiair")
-                filed += res["filed"]
-                dup += res["duplicates"]
-                err += res.get("errors", 0)
-                # Im Archiv gelandet (filed) ODER schon dort (duplicate) → löschbar.
-                for r in res["results"]:
-                    if r["status"] in ("filed", "duplicate") and r["file"] in name_to_src:
-                        candidates.append((f"{base}/{r['file']}", name_to_src[r["file"]]))
-            for t in temps:
-                try:
-                    os.unlink(t)
-                except OSError:
-                    pass
+        async with async_session() as sdb:
+            usr = await sdb.get(User, uid)
+            rg = await sdb.scalar(select(AsiairRig).where(AsiairRig.id == rid))
+            client = AsiairClient(rg.host or "", rg.share or "")
+            yield ev({"type": "scanning"})
+            try:
+                files = await asyncio.to_thread(client.scan)
+            except AsiairError as e:
+                yield ev({"type": "error", "message": str(e)})
+                return
 
-        # Auto-Cleanup nur bei 100 % (kein Fehler) + Existenz-Recheck im Archiv.
-        if body.cleanup and err == 0:
-            for rel, src in candidates:
-                try:
-                    if await asyncio.to_thread(storage.exists, rel):
-                        await asyncio.to_thread(client.delete, src)
-                        cleaned += 1
-                except Exception:  # noqa: BLE001
-                    pass
+            cat = await _catalog_map(sdb)
+            groups = _group(files)
+            objs = [(k, g) for k, g in groups.items() if selected is None or k in selected]
+            total = sum(len(g["files"]) for _, g in objs)
+            yield ev({"type": "scanned", "objects": len(objs), "files": total})
 
-        imported.append({
-            "object": g["object"], "matched_ident": match.ident if match else None,
-            "filed": filed, "duplicates": dup, "errors": err,
-            "cleaned_eligible": err == 0,
-        })
+            storage = archive.get_storage(usr)
+            imported, cleaned, done = [], 0, 0
+            for key, g in objs:
+                match = cat.get(key)
+                name = match.ident if match else g["object"]
+                obs = await _upsert_observation(sdb, usr, match, g["object"], rg.telescope_id)
+                base = archive.reldir(archive.folder_name(usr, "RAW"),
+                                      await archive.object_label(sdb, obs), await archive.device_label(sdb, obs))
+                yield ev({"type": "object", "object": name, "total": len(g["files"])})
 
-    return {"imported": imported, "cleaned": cleaned,
-            "total_filed": sum(x["filed"] for x in imported)}
+                filed = dup = err = 0
+                candidates: list[tuple[str, str]] = []
+                for i in range(0, len(g["files"]), 10):
+                    chunk = g["files"][i:i + 10]
+                    name_to_src = {f["name"]: f["path"] for f in chunk}
+                    items, temps = [], []
+                    for f in chunk:
+                        try:
+                            tmp, _sz = await asyncio.to_thread(client.read_to_temp, f["path"], _TMP)
+                        except Exception:  # noqa: BLE001
+                            err += 1
+                            continue
+                        items.append((f["name"], tmp, f["path"]))
+                        temps.append(tmp)
+                    if items:
+                        res = await archive.import_files(sdb, usr, obs, items, source="asiair")
+                        filed += res["filed"]
+                        dup += res["duplicates"]
+                        err += res.get("errors", 0)
+                        for r in res["results"]:
+                            if r["status"] in ("filed", "duplicate") and r["file"] in name_to_src:
+                                candidates.append((f"{base}/{r['file']}", name_to_src[r["file"]]))
+                    for t in temps:
+                        try:
+                            os.unlink(t)
+                        except OSError:
+                            pass
+                    done += len(chunk)
+                    yield ev({"type": "progress", "done": done, "total": total, "object": name})
+
+                if do_cleanup and err == 0:
+                    for rel, src in candidates:
+                        try:
+                            if await asyncio.to_thread(storage.exists, rel):
+                                await asyncio.to_thread(client.delete, src)
+                                cleaned += 1
+                        except Exception:  # noqa: BLE001
+                            pass
+                await sdb.commit()
+                imported.append({"object": g["object"], "matched_ident": match.ident if match else None,
+                                 "filed": filed, "duplicates": dup, "errors": err})
+
+            yield ev({"type": "done", "imported": imported, "cleaned": cleaned,
+                      "total_filed": sum(x["filed"] for x in imported)})
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
 class CleanupBody(BaseModel):
