@@ -50,6 +50,7 @@ class Storage:
     def put(self, rel: str, src_local: str) -> int: raise NotImplementedError
     def fetch(self, rel: str, dest_local: str) -> None: raise NotImplementedError
     def delete(self, rel: str) -> None: raise NotImplementedError
+    def listdir(self, rel: str) -> list[str]: raise NotImplementedError
     def full_path(self, rel: str) -> str: raise NotImplementedError
     def status(self) -> dict: raise NotImplementedError
 
@@ -80,6 +81,10 @@ class LocalStorage(Storage):
 
     def fetch(self, rel: str, dest_local: str) -> None:
         shutil.copyfile(self._abs(rel), dest_local)
+
+    def listdir(self, rel: str) -> list[str]:
+        p = self._abs(rel)
+        return [e.name for e in p.iterdir() if e.is_file()] if p.is_dir() else []
 
     def delete(self, rel: str) -> None:
         self._abs(rel).unlink(missing_ok=True)
@@ -178,6 +183,18 @@ class SmbStorage(Storage):
         with smbclient.open_file(self._unc(rel), mode="rb") as src, open(dest_local, "wb") as out:
             while chunk := src.read(1024 * 1024):
                 out.write(chunk)
+
+    def listdir(self, rel: str) -> list[str]:
+        import smbclient
+        import smbclient.path as smbpath
+        self._connect()
+        unc = self._unc(rel)
+        try:
+            if not smbpath.isdir(unc):
+                return []
+            return [n for n in smbclient.listdir(unc) if smbpath.isfile(unc + "\\" + n)]
+        except Exception:  # noqa: BLE001
+            return []
 
     def delete(self, rel: str) -> None:
         import smbclient

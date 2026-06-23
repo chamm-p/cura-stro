@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     # Feste Uhrzeit (lokale Zeit des Standorts) für den täglichen Refresh.
     cloud_refresh_hour: int = Field(default=16, ge=0, le=23)
 
+    # ─── Watch-Folder für PixInsight-Ergebnisse (Phase C) ───
+    # Überwacht Developer/<Objekt>/<Gerät>/ und hängt neue Master automatisch an.
+    result_watch_enabled: bool = Field(default=True)
+    result_watch_interval_min: int = Field(default=10, ge=1)
+
     # ─── MCP-Server (Phase 8) — Token für externen Zugriff (curai etc.) ───
     # Leer = MCP-Endpunkt deaktiviert.
     mcp_token: str = Field(default="")

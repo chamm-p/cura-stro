@@ -52,3 +52,4 @@ class ObservationOut(BaseModel):
     image_count: int = 0
     subframe_count: int = 0
     integration_s: float = 0.0
+    result_count: int = 0

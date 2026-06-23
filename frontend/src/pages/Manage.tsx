@@ -2,8 +2,8 @@ import { useEffect, useState, useCallback, useMemo } from 'react'
 import { ListChecks, Trash2, Plus, Loader2, Image as ImageIcon, ChevronUp, ChevronDown, StickyNote, X, Layers, Radio, AlertTriangle } from 'lucide-react'
 import api from '../services/api'
 import Layout from '../components/Layout'
-import ImagesModal from '../components/ImagesModal'
 import SubsModal from '../components/SubsModal'
+import ResultsModal from '../components/ResultsModal'
 import AsiairImportModal from '../components/AsiairImportModal'
 
 interface Obs {
@@ -12,7 +12,7 @@ interface Obs {
   target_label: string | null; display_label: string; status: string
   telescope_id: string | null; telescope_name: string | null; planned_date: string | null
   rating: number | null; notes: string | null; is_new: boolean; image_count: number
-  subframe_count: number; integration_s: number
+  subframe_count: number; integration_s: number; result_count: number
 }
 interface Scope { id: string; name: string }
 
@@ -39,7 +39,7 @@ export default function Manage() {
   const [scopes, setScopes] = useState<Scope[]>([])
   const [loading, setLoading] = useState(true)
   const [newLabel, setNewLabel] = useState('')
-  const [imgFor, setImgFor] = useState<Obs | null>(null)
+  const [resFor, setResFor] = useState<Obs | null>(null)
   const [subsFor, setSubsFor] = useState<Obs | null>(null)
   const [notesFor, setNotesFor] = useState<Obs | null>(null)
   const [deleteFor, setDeleteFor] = useState<Obs | null>(null)
@@ -181,8 +181,8 @@ export default function Manage() {
                     </select>
                   </td>
                   <td className="px-3 py-2">
-                    <button onClick={() => setImgFor(r)} className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-slate-200 hover:bg-white/10">
-                      <ImageIcon className="h-3.5 w-3.5" /> {r.image_count > 0 ? r.image_count : 'hochladen'}
+                    <button onClick={() => setResFor(r)} title="PixInsight-Ergebnis" className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-slate-200 hover:bg-white/10">
+                      <ImageIcon className="h-3.5 w-3.5" /> {r.result_count > 0 ? r.result_count : 'Ergebnis'}
                     </button>
                   </td>
                   <td className="px-3 py-2">
@@ -203,11 +203,12 @@ export default function Manage() {
         </div>
       )}
 
-      {imgFor && (
-        <ImagesModal
-          observationId={imgFor.id}
-          label={imgFor.display_label}
-          onClose={() => setImgFor(null)}
+      {resFor && (
+        <ResultsModal
+          observationId={resFor.id}
+          label={resFor.display_label}
+          telescopeName={resFor.telescope_name}
+          onClose={() => setResFor(null)}
           onChanged={load}
         />
       )}

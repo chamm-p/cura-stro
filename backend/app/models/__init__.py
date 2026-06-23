@@ -7,6 +7,7 @@ from app.models.image import Image  # noqa: F401
 from app.models.object_info import ObjectInfo  # noqa: F401
 from app.models.observation import Observation  # noqa: F401
 from app.models.observing import Camera, Filter, Location, Setup, Telescope  # noqa: F401
+from app.models.result_file import ResultFile  # noqa: F401
 from app.models.subframe import SubFrame  # noqa: F401
 from app.models.user import AuthMethod, User, UserRole  # noqa: F401
 
@@ -26,4 +27,5 @@ __all__ = [
     "AsiairRig",
     "SubFrame",
     "CloudForecast",
+    "ResultFile",
 ]

@@ -20,6 +20,7 @@ from app.models.catalog import CatalogObject
 from app.models.image import Image
 from app.models.observation import Observation
 from app.models.observing import Telescope
+from app.models.result_file import ResultFile
 from app.models.subframe import SubFrame
 from app.models.user import User
 from app.schemas.observation import ObservationCreate, ObservationOut, ObservationUpdate, PlanRequest
@@ -35,6 +36,7 @@ def _out(
     image_count: int = 0,
     subframe_count: int = 0,
     integration_s: float = 0.0,
+    result_count: int = 0,
 ) -> ObservationOut:
     label = (obj.ident if obj else None) or o.target_label or "—"
     return ObservationOut(
@@ -57,6 +59,7 @@ def _out(
         image_count=image_count,
         subframe_count=subframe_count,
         integration_s=integration_s,
+        result_count=result_count,
     )
 
 
@@ -83,8 +86,14 @@ async def list_observations(user: User = Depends(get_current_user), db: AsyncSes
             .group_by(SubFrame.observation_id)
         )
     }
+    res_counts = dict(
+        (oid, n)
+        for oid, n in await db.execute(
+            select(ResultFile.observation_id, func.count()).where(ResultFile.user_id == user.id).group_by(ResultFile.observation_id)
+        )
+    )
     return [
-        _out(o, obj, scope, counts.get(o.id, 0), *sub_stats.get(o.id, (0, 0.0)))
+        _out(o, obj, scope, counts.get(o.id, 0), *sub_stats.get(o.id, (0, 0.0)), res_counts.get(o.id, 0))
         for o, obj, scope in rows
     ]
 
