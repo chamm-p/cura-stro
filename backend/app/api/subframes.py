@@ -13,6 +13,7 @@ import uuid
 from pathlib import Path, PurePosixPath
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,11 +23,12 @@ from app.database import get_db
 from app.models.observation import Observation
 from app.models.subframe import SubFrame
 from app.models.user import User
-from app.services import archive
+from app.services import archive, image_processing
 
 router = APIRouter(tags=["subframes"])
 settings = get_settings()
 _TMP = Path(settings.outputs_dir) / "tmp"
+_PREVIEW_DIR = Path(settings.outputs_dir) / "subprev"
 _ALLOWED = {".fit", ".fits", ".fts", ".xisf"}
 
 
@@ -101,6 +103,48 @@ async def upload_subframes(
     return result
 
 
+@router.get("/api/observations/{obs_id}/subframes/{sub_id}/preview")
+async def subframe_preview(
+    obs_id: str, sub_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    """Gestreckte JPG-Vorschau eines Subs (STF-Autostretch wie beim Foto-Upload).
+    Liest die Datei aus dem Archiv (lokal/NAS), gecacht pro Sub."""
+    obs = await _owned_observation(db, user, obs_id)
+    try:
+        s = await db.scalar(select(SubFrame).where(SubFrame.id == uuid.UUID(sub_id), SubFrame.observation_id == obs.id))
+    except ValueError:
+        s = None
+    if not s:
+        raise HTTPException(404, "Sub nicht gefunden")
+
+    _PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    cache = _PREVIEW_DIR / f"{s.id}.jpg"
+    if cache.exists():
+        return FileResponse(cache, media_type="image/jpeg")
+
+    ext = Path(s.original_filename).suffix.lower()
+    fmt = "xisf" if ext == ".xisf" else "fits"
+    obj = await archive.object_label(db, obs)
+    dev = await archive.device_label(db, obs)
+    rel = f"{archive.reldir(archive.folder_name(user, 'RAW'), obj, dev)}/{PurePosixPath(s.original_filename).name}"
+    storage = archive.get_storage(user)
+
+    _TMP.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=_TMP, suffix=ext or ".fit")
+    os.close(fd)
+    try:
+        await asyncio.to_thread(storage.fetch, rel, tmp)
+        await asyncio.to_thread(image_processing.process, tmp, fmt, str(cache))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(422, f"Vorschau fehlgeschlagen: {e}")
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return FileResponse(cache, media_type="image/jpeg")
+
+
 @router.delete("/api/observations/{obs_id}/subframes/{sub_id}", status_code=204)
 async def delete_subframe(
     obs_id: str, sub_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
@@ -123,4 +167,5 @@ async def delete_subframe(
         await asyncio.to_thread(storage.delete, rel)
     except Exception:  # noqa: BLE001
         pass
+    (_PREVIEW_DIR / f"{s.id}.jpg").unlink(missing_ok=True)  # Vorschau-Cache
     await db.delete(s)

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { X, Upload, Trash2, Loader2, Layers, CheckCircle2, AlertTriangle } from 'lucide-react'
+import { X, Upload, Trash2, Loader2, Layers, CheckCircle2, AlertTriangle, ChevronLeft, ChevronRight, Eye } from 'lucide-react'
 import api from '../services/api'
+import AuthImage from './AuthImage'
 
 interface Frame {
   id: string; filename: string; frame_type: string; filter: string | null
@@ -27,6 +28,7 @@ export default function SubsModal({
   const [err, setErr] = useState('')
   const [dragOver, setDragOver] = useState(false)
   const [showFrames, setShowFrames] = useState(false)
+  const [viewIdx, setViewIdx] = useState<number | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
   const load = useCallback(() => {
@@ -38,9 +40,17 @@ export default function SubsModal({
   useEffect(() => { load() }, [load])
 
   useEffect(() => {
-    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    const h = (e: KeyboardEvent) => {
+      if (viewIdx !== null) {
+        if (e.key === 'Escape') setViewIdx(null)
+        else if (e.key === 'ArrowLeft') setViewIdx((i) => (i === null ? i : Math.max(0, i - 1)))
+        else if (e.key === 'ArrowRight') setViewIdx((i) => (i === null ? i : Math.min(frames.length - 1, i + 1)))
+        return
+      }
+      if (e.key === 'Escape') onClose()
+    }
     window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h)
-  }, [onClose])
+  }, [onClose, viewIdx, frames.length])
 
   const upload = async (files: FileList | File[]) => {
     const arr = Array.from(files)
@@ -64,6 +74,7 @@ export default function SubsModal({
   }
 
   return (
+    <>
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
       <div className="max-h-[88vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-white/10 bg-[#0a0c18] p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
         <div className="mb-4 flex items-center justify-between">
@@ -114,19 +125,24 @@ export default function SubsModal({
               {showFrames ? 'Einzel-Subs ausblenden' : `Alle ${frames.length} Subs anzeigen`}
             </button>
             {showFrames && (
-              <div className="mt-2 max-h-64 space-y-1 overflow-y-auto rounded-lg border border-white/10 bg-black/30 p-2">
-                {frames.map((fr) => (
-                  <div key={fr.id} className="flex items-center justify-between gap-2 rounded px-2 py-1 text-xs hover:bg-white/5">
-                    <span className="truncate text-slate-300" title={fr.filename}>{fr.filename}</span>
-                    <span className="flex shrink-0 items-center gap-2 text-slate-500">
-                      {fr.filter && <span className="rounded bg-white/10 px-1.5">{fr.filter}</span>}
-                      {fr.exposure_s ? `${fr.exposure_s}s` : ''}
-                      {fr.verified && <CheckCircle2 className="h-3 w-3 text-emerald-400" />}
-                      <button onClick={() => del(fr.id)} className="rounded p-0.5 text-slate-500 hover:bg-red-500/20 hover:text-red-300"><Trash2 className="h-3.5 w-3.5" /></button>
-                    </span>
-                  </div>
-                ))}
-              </div>
+              <>
+                <p className="mt-1 text-[11px] text-slate-500">Sub anklicken → gestreckte Vorschau (mit ←/→ blättern).</p>
+                <div className="mt-1 max-h-64 space-y-1 overflow-y-auto rounded-lg border border-white/10 bg-black/30 p-2">
+                  {frames.map((fr, i) => (
+                    <div key={fr.id} className="flex items-center justify-between gap-2 rounded px-2 py-1 text-xs hover:bg-white/5">
+                      <button onClick={() => setViewIdx(i)} className="flex min-w-0 items-center gap-1 text-left text-slate-300 hover:text-white" title="Gestreckte Vorschau">
+                        <Eye className="h-3 w-3 shrink-0 text-slate-500" /><span className="truncate">{fr.filename}</span>
+                      </button>
+                      <span className="flex shrink-0 items-center gap-2 text-slate-500">
+                        {fr.filter && <span className="rounded bg-white/10 px-1.5">{fr.filter}</span>}
+                        {fr.exposure_s ? `${fr.exposure_s}s` : ''}
+                        {fr.verified && <CheckCircle2 className="h-3 w-3 text-emerald-400" />}
+                        <button onClick={() => del(fr.id)} className="rounded p-0.5 text-slate-500 hover:bg-red-500/20 hover:text-red-300"><Trash2 className="h-3.5 w-3.5" /></button>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </>
             )}
           </div>
         ) : (
@@ -134,5 +150,29 @@ export default function SubsModal({
         )}
       </div>
     </div>
+
+    {viewIdx !== null && frames[viewIdx] && (
+      <div className="fixed inset-0 z-[60] flex flex-col bg-black/90" onClick={() => setViewIdx(null)}>
+        <div className="flex items-center justify-between gap-3 px-4 py-2 text-sm text-slate-200" onClick={(e) => e.stopPropagation()}>
+          <span className="truncate">{frames[viewIdx].filename}</span>
+          <span className="flex shrink-0 items-center gap-3 text-xs text-slate-400">
+            <span>{viewIdx + 1} / {frames.length}</span>
+            {frames[viewIdx].filter && <span className="rounded bg-white/10 px-1.5">{frames[viewIdx].filter}</span>}
+            {frames[viewIdx].exposure_s ? <span>{frames[viewIdx].exposure_s}s</span> : null}
+            <button onClick={() => setViewIdx(null)} className="rounded-lg p-1.5 hover:bg-white/10"><X className="h-5 w-5" /></button>
+          </span>
+        </div>
+        <div className="relative flex flex-1 items-center justify-center overflow-hidden" onClick={(e) => e.stopPropagation()}>
+          <button onClick={() => setViewIdx((i) => (i === null ? i : Math.max(0, i - 1)))} disabled={viewIdx === 0}
+            className="absolute left-2 z-10 rounded-full bg-white/10 p-2 text-white hover:bg-white/20 disabled:opacity-30"><ChevronLeft className="h-6 w-6" /></button>
+          <AuthImage key={frames[viewIdx].id} src={`/api/observations/${observationId}/subframes/${frames[viewIdx].id}/preview`}
+            alt={frames[viewIdx].filename} className="max-h-full max-w-full object-contain" />
+          <button onClick={() => setViewIdx((i) => (i === null ? i : Math.min(frames.length - 1, i + 1)))} disabled={viewIdx === frames.length - 1}
+            className="absolute right-2 z-10 rounded-full bg-white/10 p-2 text-white hover:bg-white/20 disabled:opacity-30"><ChevronRight className="h-6 w-6" /></button>
+        </div>
+        <div className="px-4 py-2 text-center text-[11px] text-slate-500">←/→ blättern · ESC schließen · gestreckt (Autostretch)</div>
+      </div>
+    )}
+    </>
   )
 }

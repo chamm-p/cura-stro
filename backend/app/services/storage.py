@@ -48,6 +48,7 @@ class Storage:
     def makedirs(self, rel: str) -> None: raise NotImplementedError
     def exists(self, rel: str) -> bool: raise NotImplementedError
     def put(self, rel: str, src_local: str) -> int: raise NotImplementedError
+    def fetch(self, rel: str, dest_local: str) -> None: raise NotImplementedError
     def delete(self, rel: str) -> None: raise NotImplementedError
     def full_path(self, rel: str) -> str: raise NotImplementedError
     def status(self) -> dict: raise NotImplementedError
@@ -76,6 +77,9 @@ class LocalStorage(Storage):
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src_local, dst)
         return dst.stat().st_size
+
+    def fetch(self, rel: str, dest_local: str) -> None:
+        shutil.copyfile(self._abs(rel), dest_local)
 
     def delete(self, rel: str) -> None:
         self._abs(rel).unlink(missing_ok=True)
@@ -167,6 +171,13 @@ class SmbStorage(Storage):
                 fdst.write(chunk)
                 size += len(chunk)
         return size
+
+    def fetch(self, rel: str, dest_local: str) -> None:
+        import smbclient
+        self._connect()
+        with smbclient.open_file(self._unc(rel), mode="rb") as src, open(dest_local, "wb") as out:
+            while chunk := src.read(1024 * 1024):
+                out.write(chunk)
 
     def delete(self, rel: str) -> None:
         import smbclient
