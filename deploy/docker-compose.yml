@@ -41,10 +41,12 @@ services:
       - "${BACKEND_PORT:-9605}:8000"
     volumes:
       - outputs:/app/outputs
-      # Foto-Archiv (RAW/Developer) unter /archive. Standard: CIFS-Volume
-      # archivedata (NAS, Zugangsdaten via NAS_* in .env). Alternativ einen
-      # Host-Pfad als Bind erzwingen mit ARCHIVE_PATH=/mnt/...
-      - ${ARCHIVE_PATH:-archivedata}:/archive
+      # Foto-Archiv (RAW/Developer) unter /archive. Default: Ordner ./archive
+      # im Repo-Root (entsteht beim git pull, im Finder/Host sichtbar). Per
+      # ARCHIVE_PATH in .env auf einen anderen Host-Pfad umbiegbar. Im
+      # Regelbetrieb wird ohnehin der NAS per SMB aus der App angesprochen
+      # (Einstellungen → Archiv & ASIAir) — dann ist /archive nur Fallback.
+      - ${ARCHIVE_PATH:-../archive}:/archive
     depends_on:
       db: { condition: service_healthy }
     networks: [curastro-net]
@@ -80,16 +82,12 @@ services:
 
 volumes:
   # name: auf die bisherigen Volumes gepinnt, damit die Projekt-Umbenennung
-  # (deploy → curastro) KEINE Daten verliert (DB/Archiv bleiben erhalten).
+  # (deploy → curastro) KEINE Daten verliert (DB bleibt erhalten).
   pgdata:
     name: deploy_pgdata
   outputs:
     name: deploy_outputs
-  # Foto-Archiv unter /archive (lokales Volume, Fallback ohne NAS). Der NAS
-  # wird zur Laufzeit direkt per SMB aus der App angesprochen (Einstellungen →
-  # Archiv & ASIAir), kein OS-Mount.
-  archivedata:
-    name: deploy_archivedata
+  # (Foto-Archiv ist jetzt ein Bind-Mount auf ./archive, kein Volume mehr.)
 
 networks:
   curastro-net:

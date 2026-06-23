@@ -17,3 +17,7 @@ deploy/.env
 
 # Outputs / Uploads
 backend/outputs/
+
+# Foto-Archiv (lokaler Default-Ordner; Inhalt nicht versionieren)
+/archive/*
+!/archive/.gitkeep
