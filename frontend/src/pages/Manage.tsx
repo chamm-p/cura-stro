@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
-import { ListChecks, Trash2, Plus, Loader2, Image as ImageIcon, ChevronUp, ChevronDown, StickyNote, X, Layers, Radio } from 'lucide-react'
+import { ListChecks, Trash2, Plus, Loader2, Image as ImageIcon, ChevronUp, ChevronDown, StickyNote, X, Layers, Radio, AlertTriangle } from 'lucide-react'
 import api from '../services/api'
 import Layout from '../components/Layout'
 import ImagesModal from '../components/ImagesModal'
@@ -42,6 +42,7 @@ export default function Manage() {
   const [imgFor, setImgFor] = useState<Obs | null>(null)
   const [subsFor, setSubsFor] = useState<Obs | null>(null)
   const [notesFor, setNotesFor] = useState<Obs | null>(null)
+  const [deleteFor, setDeleteFor] = useState<Obs | null>(null)
   const [asiairOpen, setAsiairOpen] = useState(false)
   const [sortField, setSortField] = useState<string | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
@@ -193,7 +194,7 @@ export default function Manage() {
                     </button>
                   </td>
                   <td className="px-3 py-2">
-                    <button onClick={() => del(r.id)} className="rounded-lg p-1.5 text-slate-400 hover:bg-red-500/20 hover:text-red-300"><Trash2 className="h-4 w-4" /></button>
+                    <button onClick={() => setDeleteFor(r)} title="Aufnahme löschen" className="rounded-lg p-1.5 text-slate-400 hover:bg-red-500/20 hover:text-red-300"><Trash2 className="h-4 w-4" /></button>
                   </td>
                 </tr>
               ))}
@@ -220,6 +221,13 @@ export default function Manage() {
         />
       )}
       {asiairOpen && <AsiairImportModal onClose={() => setAsiairOpen(false)} onImported={load} />}
+      {deleteFor && (
+        <DeleteModal
+          obs={deleteFor}
+          onClose={() => setDeleteFor(null)}
+          onConfirm={async () => { await del(deleteFor.id); setDeleteFor(null) }}
+        />
+      )}
       {notesFor && (
         <NotesModal
           obs={notesFor}
@@ -256,6 +264,43 @@ function NotesModal({ obs, onClose, onSave }: { obs: Obs; onClose: () => void; o
         <div className="mt-3 flex justify-end gap-2">
           <button onClick={onClose} className="rounded-lg border border-white/10 px-4 py-2 text-sm text-slate-300 hover:bg-white/10">Abbrechen</button>
           <button onClick={() => onSave(text)} className="rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-4 py-2 text-sm font-medium text-white hover:from-indigo-400 hover:to-violet-500">Speichern</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function DeleteModal({ obs, onClose, onConfirm }: { obs: Obs; onClose: () => void; onConfirm: () => void }) {
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h)
+  }, [onClose])
+  const subs = obs.subframe_count || 0
+  const imgs = obs.image_count || 0
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
+      <div className="w-full max-w-md rounded-2xl border border-red-400/30 bg-[#0a0c18] p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <h2 className="flex items-center gap-2 font-semibold text-red-200"><AlertTriangle className="h-5 w-5" /> Aufnahme löschen?</h2>
+        <p className="mt-3 text-sm text-slate-300">
+          <span className="font-medium text-white">{obs.object_ident || obs.target_label || obs.display_label}</span>
+          {obs.telescope_name ? <span className="text-slate-400"> · {obs.telescope_name}</span> : null}
+        </p>
+        <div className="mt-3 rounded-lg border border-red-400/30 bg-red-500/10 p-3 text-sm text-red-100">
+          Das löscht die Aufnahme <strong>unwiderruflich</strong> — inklusive:
+          <ul className="mt-1.5 list-disc pl-5 text-red-100/90">
+            <li><strong>{subs}</strong> hochgeladene{subs === 1 ? 'r' : ''} Sub{subs === 1 ? '' : 's'}{obs.integration_s ? ` (${fmtInteg(obs.integration_s)})` : ''} aus dem <strong>Archiv</strong></li>
+            {imgs > 0 && <li><strong>{imgs}</strong> Ergebnis-Bild{imgs === 1 ? '' : 'er'}</li>}
+            <li>alle zugehörigen Daten in der App</li>
+          </ul>
+          <p className="mt-2 text-xs text-red-200/80">Hinweis: Auf der ASIAir wird nichts angefasst — nur das Archiv (NAS/lokal).</p>
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <button onClick={onClose} className="rounded-lg border border-white/10 px-4 py-2 text-sm text-slate-300 hover:bg-white/10">Abbrechen</button>
+          <button onClick={async () => { setBusy(true); try { await onConfirm() } finally { setBusy(false) } }} disabled={busy}
+            className="flex items-center gap-1.5 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500 disabled:opacity-50">
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />} Endgültig löschen
+          </button>
         </div>
       </div>
     </div>

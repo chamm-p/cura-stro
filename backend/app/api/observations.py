@@ -4,14 +4,18 @@ Jede Zeile = eine Aufnahme eines Objekts mit einem Teleskop in einer Nacht,
 Status geplant → raw → entwickelt. Ein Objekt kann mehrere Aufnahmen haben
 (verschiedene Geräte/Nächte)."""
 
+import asyncio
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.config import get_settings
 from app.database import get_db
+from app.services import archive
 from app.models.catalog import CatalogObject
 from app.models.image import Image
 from app.models.observation import Observation
@@ -207,17 +211,25 @@ async def update_observation(
 @router.delete("/{obs_id}", status_code=204)
 async def delete_observation(obs_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     o = await _owned(db, user, obs_id)
-    # Zugehörige Bilddateien von der Platte entfernen (DB-Cascade löscht nur Zeilen).
-    from pathlib import Path
-
+    # Zugehörige (lokale) Bilddateien entfernen (DB-Cascade löscht nur Zeilen).
     imgs = await db.scalars(select(Image).where(Image.observation_id == o.id))
     for img in imgs:
         for p in (img.file_path, img.jpg_path):
             if p:
                 Path(p).unlink(missing_ok=True)
-    # Subframe-Dateien im Archiv mit entfernen (DB-Cascade löscht nur Zeilen).
-    subs = await db.scalars(select(SubFrame.archive_path).where(SubFrame.observation_id == o.id))
-    for p in subs:
-        if p:
-            Path(p).unlink(missing_ok=True)
+
+    # Subframe-Dateien im Archiv (lokal ODER NAS) über die Storage-Schicht
+    # löschen — UNC-Pfade kann Path.unlink nicht; daher rel rekonstruieren.
+    subs = list(await db.scalars(select(SubFrame).where(SubFrame.observation_id == o.id)))
+    if subs:
+        storage = archive.get_storage(user)
+        base = archive.reldir(archive.folder_name(user, "RAW"),
+                              await archive.object_label(db, o), await archive.device_label(db, o))
+        prev_dir = Path(get_settings().outputs_dir) / "subprev"
+        for s in subs:
+            try:
+                await asyncio.to_thread(storage.delete, f"{base}/{s.original_filename}")
+            except Exception:  # noqa: BLE001
+                pass
+            (prev_dir / f"{s.id}.jpg").unlink(missing_ok=True)  # Vorschau-Cache
     await db.delete(o)
