@@ -11,7 +11,11 @@ import asyncio
 import ipaddress
 
 
-async def _check(ip: str, port: int = 445, timeout: float = 0.6) -> str | None:
+# SMB hört auf 445 (direct host) und/oder 139 (NetBIOS) — ASIAirs teils nur 139.
+SMB_PORTS = (445, 139)
+
+
+async def _one(ip: str, port: int, timeout: float) -> bool:
     try:
         fut = asyncio.open_connection(ip, port)
         _reader, writer = await asyncio.wait_for(fut, timeout)
@@ -20,18 +24,25 @@ async def _check(ip: str, port: int = 445, timeout: float = 0.6) -> str | None:
             await asyncio.wait_for(writer.wait_closed(), 0.3)
         except Exception:  # noqa: BLE001
             pass
-        return ip
+        return True
     except Exception:  # noqa: BLE001
-        return None
+        return False
 
 
-async def scan_subnet(subnet: str, port: int = 445, timeout: float = 0.6, limit: int = 512) -> list[str]:
+async def _check(ip: str, ports: tuple[int, ...], timeout: float) -> str | None:
+    for port in ports:
+        if await _one(ip, port, timeout):
+            return ip
+    return None
+
+
+async def scan_subnet(subnet: str, ports: tuple[int, ...] = SMB_PORTS, timeout: float = 0.8, limit: int = 512) -> list[str]:
     net = ipaddress.ip_network(subnet, strict=False)
     hosts = [str(ip) for ip in list(net.hosts())[:limit]]
     # In Häppchen, um nicht zu viele Sockets gleichzeitig zu öffnen.
     open_hosts: list[str] = []
     for i in range(0, len(hosts), 128):
         batch = hosts[i:i + 128]
-        results = await asyncio.gather(*[_check(h, port, timeout) for h in batch])
+        results = await asyncio.gather(*[_check(h, ports, timeout) for h in batch])
         open_hosts.extend([r for r in results if r])
     return open_hosts

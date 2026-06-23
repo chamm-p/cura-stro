@@ -577,7 +577,7 @@ function ArchiveTab() {
         <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-5">
           <input className={inputCls} placeholder="Name (z. B. ASIAir ES127)" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
           <input className={inputCls} placeholder="Host/IP" value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} />
-          <input className={inputCls} placeholder="Freigabe (z. B. Autorun)" value={form.share} onChange={(e) => setForm({ ...form, share: e.target.value })} />
+          <input className={inputCls} placeholder="Freigabe (z. B. EMMC Images)" value={form.share} onChange={(e) => setForm({ ...form, share: e.target.value })} />
           <select className={inputCls} value={form.telescope_id} onChange={(e) => setForm({ ...form, telescope_id: e.target.value })}>
             <option value="">Teleskop …</option>
             {scopes.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
@@ -599,7 +599,7 @@ function ArchiveTab() {
           ))}
           {hosts && hosts.length === 0 && <span className="text-xs text-slate-500">nichts gefunden</span>}
         </div>
-        <p className="mt-1.5 text-[11px] text-slate-500">Eine ASIAir je Teleskop. „Freigabe" = SMB-Share der ASIAir (oft <span className="font-mono">Autorun</span>; siehst du am Mac-Mount). Die Suche listet SMB-Hosts im Subnetz — passenden anklicken füllt den Host.</p>
+        <p className="mt-1.5 text-[11px] text-slate-500">Eine ASIAir je Teleskop. „Freigabe" = SMB-Share der ASIAir, je nach Speicher: <span className="font-mono">EMMC Images</span> (intern), <span className="font-mono">Udisk Images</span> (USB) oder <span className="font-mono">TF Images</span> (SD-Karte). Die Suche listet SMB-Hosts im Subnetz — passenden anklicken füllt den Host. Zugriff per Gast (kein Passwort).</p>
       </div>
     </div>
   )
@@ -702,7 +702,7 @@ function RigRow({ r, scopes, reload }: { r: Rig; scopes: Scope[]; reload: () => 
           <input className={`${cell} w-36`} value={host} placeholder="IP/Hostname" onChange={(e) => setHost(e.target.value)} onBlur={() => host !== (r.host ?? '') && save({ host: host || null })} />
         </label>
         <label className="flex items-center gap-1">Freigabe
-          <input className={`${cell} w-28`} value={share} placeholder="Autorun" onChange={(e) => setShare(e.target.value)} onBlur={() => share !== (r.share ?? '') && save({ share: share || null })} />
+          <input className={`${cell} w-32`} value={share} placeholder="EMMC Images" onChange={(e) => setShare(e.target.value)} onBlur={() => share !== (r.share ?? '') && save({ share: share || null })} />
         </label>
         <label className="flex items-center gap-1">Teleskop
           <select className={cell} value={r.telescope_id ?? ''} onChange={(e) => save({ telescope_id: e.target.value || null })}>

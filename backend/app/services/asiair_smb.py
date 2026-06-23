@@ -27,17 +27,25 @@ class AsiairClient:
         self.host = (host or "").strip()
         self.share = (share or "").strip().strip("/\\")
         self.base = (base or "").strip().strip("/\\")
-        self.user = user or ""
+        # ASIAir-Samba erlaubt Gast — Default „guest", kein Passwort.
+        self.user = user or "guest"
         self.password = password or ""
         if not self.host:
             raise AsiairError("ASIAir-Host/IP fehlt.")
         if not self.share:
-            raise AsiairError("ASIAir-Freigabe (Share) fehlt — in den ASIAir-Einstellungen eintragen.")
+            raise AsiairError("ASIAir-Freigabe (Share) fehlt — z. B. 'EMMC Images'.")
 
     def _connect(self):
         import smbclient
-        # Gast/anonym: leere Credentials.
-        smbclient.register_session(self.host, username=self.user, password=self.password)
+        # Gast-Session: die ASIAir verlangt KEIN Signing/keine Verschlüsselung;
+        # smbprotocol erzwingt beides per Default. Für Gast deaktivieren:
+        #  - require_signing=False (sonst „guest does not support signing")
+        #  - require_secure_negotiate=False (Negotiate-Verify braucht Signing-Key)
+        # Vertretbar im vertrauten LAN.
+        smbclient.ClientConfig(require_secure_negotiate=False)
+        smbclient.register_session(
+            self.host, username=self.user, password=self.password, require_signing=False
+        )
 
     def _root_unc(self) -> str:
         unc = rf"\\{self.host}\{self.share}"
