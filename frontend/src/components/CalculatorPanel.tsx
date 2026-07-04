@@ -1,6 +1,6 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { Link } from 'react-router-dom'
-import { Layers, MapPin, Loader2, Crop, Clock } from 'lucide-react'
+import { Layers, MapPin, Loader2, Crop, Clock, RotateCcw, Move } from 'lucide-react'
 import api from '../services/api'
 
 interface Setup { id: string; name: string; telescope_id: string; camera_id: string; telescope_name: string; camera_name: string; focal_ratio: number | null }
@@ -38,6 +38,12 @@ export default function CalculatorPanel({
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(false)
 
+  // --- Interaktiver Frame: Position & Rotation ---
+  const [frameOffset, setFrameOffset] = useState({ x: 0, y: 0 })
+  const [frameRot, setFrameRot] = useState(0)
+  const [dragging, setDragging] = useState(false)
+  const dragStart = useRef({ x: 0, y: 0, ox: 0, oy: 0 })
+
   useEffect(() => {
     api.get('/api/equipment/setups').then((r) => {
       const list: Setup[] = r.data
@@ -72,6 +78,33 @@ export default function CalculatorPanel({
   const pf = fr?.preview_fov_deg || 1
   const relW = fr ? (fr.fov_width_deg / pf) * 100 : 100
   const relH = fr ? (fr.fov_height_deg / pf) * 100 : 100
+
+  // Frame zurücksetzen wenn sich das Vorschaubild ändert (neues Objekt / neues Setup)
+  useEffect(() => {
+    setFrameOffset({ x: 0, y: 0 })
+    setFrameRot(0)
+  }, [fr?.preview_url, setupId])
+
+  // --- Drag-Handler ---
+  const onPointerDown = (e: React.PointerEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setDragging(true)
+    dragStart.current = { x: e.clientX, y: e.clientY, ox: frameOffset.x, oy: frameOffset.y }
+    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+  }
+  const onPointerMove = (e: React.PointerEvent) => {
+    if (!dragging) return
+    const dx = e.clientX - dragStart.current.x
+    const dy = e.clientY - dragStart.current.y
+    setFrameOffset({ x: dragStart.current.ox + dx, y: dragStart.current.oy + dy })
+  }
+  const onPointerUp = (e: React.PointerEvent) => {
+    setDragging(false)
+    try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId) } catch { /* ignore */ }
+  }
+
+  const resetFrame = () => { setFrameOffset({ x: 0, y: 0 }); setFrameRot(0) }
 
   return (
     <div>
@@ -123,11 +156,59 @@ export default function CalculatorPanel({
             </div>
             {fr.object && fr.preview_url && (
               <div className="mt-4">
-                <div className="relative mx-auto aspect-square w-full max-w-sm overflow-hidden rounded-lg bg-black">
-                  <img src={fr.preview_url} alt="Framing" className="h-full w-full object-cover opacity-90" />
-                  <div className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 border-2 border-indigo-400 shadow-[0_0_0_2000px_rgba(0,0,0,0.45)]"
-                    style={{ width: `${relW}%`, height: `${relH}%` }} />
+                <div className="relative mx-auto aspect-square w-full max-w-sm select-none overflow-hidden rounded-lg bg-black">
+                  <img src={fr.preview_url} alt="Framing" className="pointer-events-none h-full w-full object-cover opacity-90" draggable={false} />
+                  {/* Sensor-Rahmen: verschiebbar & drehbar */}
+                  <div
+                    onPointerDown={onPointerDown}
+                    onPointerMove={onPointerMove}
+                    onPointerUp={onPointerUp}
+                    onPointerCancel={onPointerUp}
+                    className={`absolute touch-none border-2 border-indigo-400 shadow-[0_0_0_2000px_rgba(0,0,0,0.45)] ${dragging ? 'cursor-grabbing' : 'cursor-grab'}`}
+                    style={{
+                      width: `${relW}%`,
+                      height: `${relH}%`,
+                      left: '50%',
+                      top: '50%',
+                      transform: `translate(calc(-50% + ${frameOffset.x}px), calc(-50% + ${frameOffset.y}px)) rotate(${frameRot}deg)`,
+                    }}
+                  >
+                    {/* Fadenkreuz in der Mitte des Rahmens */}
+                    <div className="pointer-events-none absolute left-1/2 top-1/2 h-6 w-6 -translate-x-1/2 -translate-y-1/2">
+                      <div className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-indigo-400/50" />
+                      <div className="absolute top-1/2 left-0 h-px w-full -translate-y-1/2 bg-indigo-400/50" />
+                    </div>
+                    {/* Eck-Markierungen */}
+                    <div className="pointer-events-none absolute -left-px -top-px h-3 w-3 border-l-2 border-t-2 border-indigo-300" />
+                    <div className="pointer-events-none absolute -right-px -top-px h-3 w-3 border-r-2 border-t-2 border-indigo-300" />
+                    <div className="pointer-events-none absolute -left-px -bottom-px h-3 w-3 border-l-2 border-b-2 border-indigo-300" />
+                    <div className="pointer-events-none absolute -right-px -bottom-px h-3 w-3 border-r-2 border-b-2 border-indigo-300" />
+                  </div>
                 </div>
+
+                {/* Steuerung: Rotation + Reset */}
+                <div className="mt-3 flex flex-wrap items-center gap-4">
+                  <label className="flex items-center gap-2 text-xs text-slate-400">
+                    <RotateCcw className="h-3.5 w-3.5 text-indigo-300" />
+                    <span>Rotation</span>
+                    <input
+                      type="range" min={-180} max={180} step={1} value={frameRot}
+                      onChange={(e) => setFrameRot(Number(e.target.value))}
+                      className="h-1 w-32 cursor-pointer appearance-none rounded-full bg-white/15 accent-indigo-400"
+                    />
+                    <span className="w-12 text-slate-300 tabular-nums">{frameRot}°</span>
+                  </label>
+                  <button
+                    onClick={resetFrame}
+                    className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1 text-xs text-slate-300 transition hover:bg-white/10"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" /> zurücksetzen
+                  </button>
+                  <span className="flex items-center gap-1 text-[11px] text-slate-500">
+                    <Move className="h-3 w-3" /> Rahmen per Drag verschieben
+                  </span>
+                </div>
+
                 <div className="mt-2 text-center text-sm">
                   <span className="font-medium">{fr.object.ident}</span>
                   {fr.object.size_major_arcmin ? <span className="text-slate-400"> · {fr.object.size_major_arcmin}' groß</span> : null}
@@ -135,7 +216,7 @@ export default function CalculatorPanel({
                     <span className={fr.object.fits ? 'text-emerald-300' : 'text-amber-300'}> · füllt {fr.object.framing_pct}% {fr.object.fits ? '' : '(passt nicht ganz)'}</span>
                   )}
                 </div>
-                <p className="mt-1 text-center text-[11px] text-slate-500">Blauer Rahmen = dein Sensorausschnitt · simulierte Objektgröße (DSS)</p>
+                <p className="mt-1 text-center text-[11px] text-slate-500">Blauer Rahmen = dein Sensorausschnitt · Drag zum Verschieben, Slider zum Drehen · DSS-Vorschau</p>
               </div>
             )}
             {!fr.object && <p className="mt-4 text-xs text-slate-500">Objekt eingeben (z. B. M31) für die simulierte Framing-Vorschau.</p>}
