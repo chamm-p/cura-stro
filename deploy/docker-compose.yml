@@ -47,6 +47,14 @@ services:
       # Regelbetrieb wird ohnehin der NAS per SMB aus der App angesprochen
       # (Einstellungen → Archiv & ASIAir) — dann ist /archive nur Fallback.
       - ${ARCHIVE_PATH:-../archive}:/archive
+    # Mac-Agent (PixInsight) erreichbar machen: der Container muss den Mac
+    # im LAN erreichen können. extra_hosts legt einen DNS-Eintrag im
+    # Container an, der auf die Host-IP des Mac zeigt. Setze in .env:
+    #   MAC_AGENT_IP=192.168.1.100   (IP deines Mac)
+    # Dann ist im Container 'mac-agent' auflösbar und PIXINSIGHT_AGENT_URL
+    # kann auf http://mac-agent:7777 gesetzt werden.
+    extra_hosts:
+      - "mac-agent:${MAC_AGENT_IP:-host-gateway}"
     depends_on:
       db: { condition: service_healthy }
     networks: [curastro-net]

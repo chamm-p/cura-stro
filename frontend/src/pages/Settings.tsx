@@ -16,7 +16,7 @@ interface Location {
 interface Scope { id: string; name: string; aperture_mm?: number | null; focal_length_mm?: number | null; focal_ratio?: number | null; limiting_magnitude?: number | null; suggested_limiting_magnitude?: number | null; notes?: string | null }
 interface Cam { id: string; name: string; pixel_size_um?: number | null; res_x?: number | null; res_y?: number | null; sensor_type: string }
 interface Filt { id: string; name: string; kind: string; bandwidth_nm?: number | null }
-interface SetupT { id: string; name: string; telescope_id: string; camera_id: string; telescope_name: string; camera_name: string; filters: { id: string; name: string; kind: string }[] }
+interface SetupT { id: string; name: string; telescope_id: string; camera_id: string; telescope_name: string; camera_name: string; filters: { id: string; name: string; kind: string }[]; calibration_dir?: string | null }
 interface AppSettings { night_start: string; night_end: string; default_location_id?: string | null; archive_root?: string }
 interface Rig { id: string; name: string; host?: string | null; share?: string | null; telescope_id?: string | null; telescope_name?: string | null }
 
@@ -895,11 +895,17 @@ function CamRow({ c, reload }: { c: Cam; reload: () => void }) {
 
 function SetupRow({ s, allFilters, reload }: { s: SetupT; allFilters: Filt[]; reload: () => void }) {
   const active = new Set(s.filters.map((f) => f.id))
+  const [calibDir, setCalibDir] = useState(s.calibration_dir || '')
+  const [editingCalib, setEditingCalib] = useState(false)
   const toggle = async (fid: string) => {
     const next = new Set(active)
     next.has(fid) ? next.delete(fid) : next.add(fid)
     await api.patch(`/api/equipment/setups/${s.id}`, { filter_ids: [...next] })
     reload()
+  }
+  const saveCalib = async () => {
+    await api.patch(`/api/equipment/setups/${s.id}`, { calibration_dir: calibDir || null })
+    setEditingCalib(false); reload()
   }
   return (
     <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2.5">
@@ -922,6 +928,26 @@ function SetupRow({ s, allFilters, reload }: { s: SetupT; allFilters: Filt[]; re
           )
         })}
         {active.size === 0 && allFilters.length > 0 && <span className="self-center text-[11px] text-slate-500">→ One-Shot (OSC, keine Wechsel)</span>}
+      </div>
+      {/* Calibration-Dir */}
+      <div className="mt-2 flex items-center gap-2 border-t border-white/5 pt-2">
+        <span className="text-[11px] text-slate-500 shrink-0">Calib-Frames:</span>
+        {editingCalib ? (
+          <>
+            <input
+              className="flex-1 rounded border border-white/10 bg-black/30 px-2 py-1 text-xs text-slate-200"
+              placeholder="/Pfad/auf/Mac/Flats_Darks"
+              value={calibDir}
+              onChange={(e) => setCalibDir(e.target.value)}
+            />
+            <button onClick={saveCalib} className="rounded bg-indigo-500/30 px-2 py-1 text-xs text-indigo-200 hover:bg-indigo-500/40">Speichern</button>
+            <button onClick={() => { setEditingCalib(false); setCalibDir(s.calibration_dir || '') }} className="rounded px-2 py-1 text-xs text-slate-400 hover:bg-white/10">Abbrechen</button>
+          </>
+        ) : (
+          <button onClick={() => setEditingCalib(true)} className="flex-1 text-left text-xs text-slate-400 hover:text-slate-200">
+            {s.calibration_dir || <span className="text-slate-600">Klicken zum Festlegen …</span>}
+          </button>
+        )}
       </div>
     </div>
   )

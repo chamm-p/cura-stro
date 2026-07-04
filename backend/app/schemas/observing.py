@@ -92,11 +92,13 @@ class SetupCreate(BaseModel):
     camera_id: str
     name: str | None = Field(default=None, max_length=160)
     filter_ids: list[str] = []
+    calibration_dir: str | None = Field(default=None, max_length=500)
 
 
 class SetupUpdate(BaseModel):
     name: str | None = Field(default=None, max_length=160)
     filter_ids: list[str] | None = None
+    calibration_dir: str | None = Field(default=None, max_length=500)
 
 
 class SetupFilterOut(BaseModel):
@@ -115,6 +117,7 @@ class SetupOut(BaseModel):
     camera_name: str
     focal_ratio: float | None = None
     filters: list[SetupFilterOut] = []
+    calibration_dir: str | None = None
 
 
 # ─── Settings ───

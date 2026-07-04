@@ -1,7 +1,7 @@
 /* cura_batch.js — PixInsight PJSR Batch-Skript (WBPP-Wrapper)
  *
  * Wird headless vom Mac-Agent aufgerufen:
- *   PixInsight -run=cura_batch.js --input=<dir> --output=<dir> --info=<json> --wbpp=<path>
+ *   PixInsight -run=cura_batch.js --input=<dir> --output=<dir> --info=<json> --wbpp=<path> --mode=<wbpp|fastbatch> --calib=<dir>
  *
  * Dieses Skript ist ein DÜNNER WRAPPER um das WeightedBatchPreProcessing (WBPP)-
  * Skript von PixInsight. WBPP übernimmt die komplette Vorverarbeitung:
@@ -56,6 +56,8 @@ console.writeln("=== cura-stro Batch (WBPP-Wrapper) ===");
 console.writeln("Input:  " + inputDir);
 console.writeln("Output: " + outputDir);
 console.writeln("WBPP:   " + (wbppPath.isEmpty() ? "(nicht angegeben)" : wbppPath));
+console.writeln("Mode:   " + mode);
+console.writeln("Calib:  " + (calibDir.isEmpty() ? "(keine)" : calibDir));
 
 // ─── Frame-Info laden (optional) ───
 var frameInfo = {};
@@ -205,6 +207,18 @@ if (!wbppSuccess) {
     }
 
     var allFiles = listFiles(inputDir);
+
+    // Calibration-Frames aus calibDir hinzufügen (falls angegeben)
+    if (!calibDir.isEmpty() && File.directoryExists(calibDir)) {
+        console.writeln("Lade Calibration-Frames aus: " + calibDir);
+        var calibFiles = listFiles(calibDir);
+        for (var ci = 0; ci < calibFiles.length; ++ci) {
+            if (isImageFile(calibFiles[ci])) {
+                allFiles.push(calibFiles[ci]);
+            }
+        }
+    }
+
     var lights = [], darks = [], flats = [], biases = [], darkflats = [];
 
     for (var i = 0; i < allFiles.length; ++i) {

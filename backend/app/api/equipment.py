@@ -194,6 +194,7 @@ async def _setup_out(db: AsyncSession, s: Setup) -> SetupOut:
         camera_name=cname,
         focal_ratio=ratio,
         filters=[SetupFilterOut(id=str(f.id), name=f.name, kind=f.kind, bandwidth_nm=f.bandwidth_nm) for f in flt],
+        calibration_dir=s.calibration_dir,
     )
 
 
@@ -216,7 +217,7 @@ async def create_setup(
 ):
     scope = await _owned(db, Telescope, user, body.telescope_id)
     cam = await _owned(db, Camera, user, body.camera_id)
-    s = Setup(user_id=user.id, name=body.name, telescope_id=scope.id, camera_id=cam.id)
+    s = Setup(user_id=user.id, name=body.name, telescope_id=scope.id, camera_id=cam.id, calibration_dir=body.calibration_dir)
     db.add(s)
     await db.flush()
     await _set_setup_filters(db, user, s.id, body.filter_ids)
@@ -232,6 +233,8 @@ async def update_setup(
         s.name = body.name or None
     if body.filter_ids is not None:
         await _set_setup_filters(db, user, s.id, body.filter_ids)
+    if body.calibration_dir is not None:
+        s.calibration_dir = body.calibration_dir or None
     await db.flush()
     return await _setup_out(db, s)
 

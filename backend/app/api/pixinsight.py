@@ -1,6 +1,7 @@
 """PixInsight-Batch-API — triggert die Verarbeitung auf dem Mac-Agent.
 
 Endpoints:
+    GET    /api/observations/{obs_id}/precheck  — Pre-Flight-Check
     POST   /api/observations/{obs_id}/process   — PixInsight-Batch starten
     POST   /api/observations/{obs_id}/poll       — Job-Ergebnisse abholen
     GET    /api/pixinsight/status/{job_id}       — Job-Status abfragen
@@ -38,27 +39,53 @@ async def _owned_obs(db: AsyncSession, user: User, obs_id: str) -> Observation:
     return o
 
 
+class ProcessRequest(BaseModel):
+    mode: str = "wbpp"  # wbpp · fastbatch · shell_sim
+
+
 class PollRequest(BaseModel):
     job_id: str
+
+
+@router.get("/api/observations/{obs_id}/precheck")
+async def precheck(
+    obs_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pre-Flight-Check vor dem PixInsight-Batch.
+
+    Prüft Sub-Frames (Lights/Darks/Flats/Bias), Calibration-Dir,
+    Mac-Agent-Erreichbarkeit und liefert Warnungen/Errors sowie
+    ein ``can_start`` Flag.
+    """
+    obs = await _owned_obs(db, user, obs_id)
+    return await pixinsight.precheck(db, user, obs)
 
 
 @router.post("/api/observations/{obs_id}/process")
 async def trigger_processing(
     obs_id: str,
+    body: ProcessRequest | None = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Startet den PixInsight-Batch für diese Aufnahme über den Mac-Agent.
 
     Liest die RAW-Dateien vom NAS, zippt sie und lädt sie per HTTP an den
-    Mac-Agent hoch. Der Agent verarbeitet sie mit PixInsight/WBPP.
+    Mac-Agent hoch. Der Agent verarbeitet sie mit PixInsight/WBPP (oder
+    Shell-Simulation im Test-Modus).
+
+    Parameter (JSON body, optional):
+        mode — "wbpp" (Standard), "fastbatch" oder "shell_sim" (Test-Modus)
 
     Setzt den Status auf 'in_bearbeitung'. Die Ergebnisse müssen später per
     POST /api/observations/{obs_id}/poll abgeholt werden (Status → 'vorbereitet').
     """
     obs = await _owned_obs(db, user, obs_id)
+    mode = body.mode if body else "wbpp"
     try:
-        result = await pixinsight.trigger_batch(db, user, obs)
+        result = await pixinsight.trigger_batch(db, user, obs, mode=mode)
         await db.commit()
         return result
     except ValueError as e:
