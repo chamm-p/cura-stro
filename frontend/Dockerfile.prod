@@ -6,7 +6,10 @@ ARG VITE_API_URL=""
 ENV VITE_API_URL=$VITE_API_URL
 
 COPY package.json package-lock.json* ./
-RUN npm ci || npm install
+# Lock-Datei entfernen, damit npm plattform-spezifische optionale
+# Dependencies (z. B. @rollup/rollup-linux-arm64-musl) korrekt auflöst.
+# Verhindert den bekannten npm-Bug bei Multi-Arch-Builds.
+RUN rm -f package-lock.json && npm install
 
 COPY . .
 RUN npm run build
