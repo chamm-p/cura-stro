@@ -246,6 +246,43 @@ async def _collect_raw_files(
     return files
 
 
+async def _collect_calibration_files(
+    db: AsyncSession, user: User, obs: Observation, calib_dirs: dict[str, str]
+) -> list[tuple[str, bytes]]:
+    """Liest Kalibrierungs-Frames (Flats/Darks/Bias) vom NAS (Storage) und
+    liefert (filename, content) Paare. Die Pfade in calib_dirs sind relativ
+    zum Archiv-Root."""
+    storage = archive.get_storage(user)
+    files: list[tuple[str, bytes]] = []
+    for dir_key, label in [("flats_dir", "Flats"), ("darks_dir", "Darks"), ("bias_dir", "Bias")]:
+        rel_dir = calib_dirs.get(dir_key, "")
+        if not rel_dir:
+            continue
+        try:
+            names = await asyncio.to_thread(storage.listdir, rel_dir)
+            if not names:
+                logger.warning("PixInsight: Calib-Verzeichnis %s leer/nicht gefunden: %s", label, rel_dir)
+                continue
+            for name in names:
+                rel = "/".join(p for p in (rel_dir + "/" + name).replace("\\", "/").split("/") if p)
+                tmp_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(name).suffix) as tmp:
+                        tmp_path = tmp.name
+                    await asyncio.to_thread(storage.fetch, rel, tmp_path)
+                    with open(tmp_path, "rb") as f:
+                        content = f.read()
+                    files.append((name, content))
+                    logger.info("PixInsight: Calib gelesen — %s (%d bytes)", name, len(content))
+                except Exception as e:
+                    logger.warning("PixInsight: Calib-Datei nicht lesbar — %s: %s", name, e)
+                finally:
+                    if tmp_path:
+                        Path(tmp_path).unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning("PixInsight: Calib-Verzeichnis nicht lesbar — %s (%s): %s", label, rel_dir, e)
+    return files
+
 def _create_zip(files: list[tuple[str, bytes]]) -> bytes:
     """Erstellt ein ZIP im Speicher aus (filename, content) Paaren."""
     buf = io.BytesIO()
@@ -324,11 +361,17 @@ async def _do_batch_transfer(
                 return
 
             job.input_files = len(raw_files)
-            logger.info("PixInsight [job=%s]: %d RAW-Dateien gelesen, erstelle ZIP …", job.id, len(raw_files))
+            logger.info("PixInsight [job=%s]: %d RAW-Dateien gelesen", job.id, len(raw_files))
+
+            # Calibration-Frames vom NAS lesen und zum ZIP hinzufügen
+            calib_files = await _collect_calibration_files(db, user, obs, calib_dirs)
+            all_files = raw_files + calib_files
+            if calib_files:
+                logger.info("PixInsight [job=%s]: %d Calib-Frames vom NAS gelesen", job.id, len(calib_files))
 
             # ZIP erstellen (im Thread, da CPU-bound)
-            zip_bytes = await asyncio.to_thread(_create_zip, raw_files)
-            logger.info("PixInsight [job=%s]: ZIP erstellt (%d bytes)", job.id, len(zip_bytes))
+            zip_bytes = await asyncio.to_thread(_create_zip, all_files)
+            logger.info("PixInsight [job=%s]: ZIP erstellt (%d bytes, %d Dateien)", job.id, len(zip_bytes), len(all_files))
 
             # Observation-Status setzen
             obs.status = "in_bearbeitung"
@@ -350,12 +393,6 @@ async def _do_batch_transfer(
             "mode": mode,
             "token": await _agent_token(),
         }
-        if calib_dirs.get("flats_dir"):
-            form_data["flats_dir"] = calib_dirs["flats_dir"]
-        if calib_dirs.get("darks_dir"):
-            form_data["darks_dir"] = calib_dirs["darks_dir"]
-        if calib_dirs.get("bias_dir"):
-            form_data["bias_dir"] = calib_dirs["bias_dir"]
 
         try:
             async with httpx.AsyncClient(timeout=600.0) as client:
@@ -721,15 +758,37 @@ async def precheck(
                 "message": f"{len(missing_archive)} Sub-Frame(s) ohne archive_path (nicht auf NAS abgelegt): {', '.join(missing_archive[:5])}{'…' if len(missing_archive) > 5 else ''}",
             })
 
-    # 2. Calibration-Dirs aus Setup (separate Pfade für Flats/Darks/Bias)
+    # 2. Calibration-Dirs aus Setup — Pfade auf dem NAS (relativ zum Archiv-Root)
     calib_dirs = await _get_calibration_dirs(db, obs)
     has_any = any(calib_dirs.values())
+    storage = archive.get_storage(user)
     calib_info: dict[str, Any] = {
         "configured": has_any,
         "flats_dir": calib_dirs.get("flats_dir") or None,
         "darks_dir": calib_dirs.get("darks_dir") or None,
         "bias_dir": calib_dirs.get("bias_dir") or None,
     }
+    # Calib-Verzeichnisse auf dem NAS prüfen (Dateizähler)
+    for dir_key, label in [("flats_dir", "Flats"), ("darks_dir", "Darks"), ("bias_dir", "Bias")]:
+        rel_dir = calib_dirs.get(dir_key, "")
+        if not rel_dir:
+            continue
+        try:
+            names = await asyncio.to_thread(storage.listdir, rel_dir)
+            calib_info[dir_key + "_count"] = len(names)
+            if not names:
+                warnings.append({
+                    "level": "warning",
+                    "code": "empty_" + dir_key,
+                    "message": label + "-Verzeichnis auf dem NAS ist leer oder existiert nicht: " + rel_dir,
+                })
+        except Exception as e:
+            calib_info[dir_key + "_count"] = 0
+            warnings.append({
+                "level": "warning",
+                "code": "unreadable_" + dir_key,
+                "message": label + "-Verzeichnis auf dem NAS nicht lesbar: " + rel_dir + " (" + str(e) + ")",
+            })
     if not has_any:
         warnings.append({
             "level": "warning",

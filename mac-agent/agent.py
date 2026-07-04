@@ -350,10 +350,7 @@ async def _run_pixinsight(job: Job) -> None:
         log.info("  Input:  %s", job.work_input)
         log.info("  Output: %s", job.work_output)
         log.info("  Mode:   %s", job.mode)
-        log.info("  Calib:  %s", job.calibration_dir or "(keine)")
-        log.info("  Flats:  %s", job.flats_dir or "(keine)")
-        log.info("  Darks:  %s", job.darks_dir or "(keine)")
-        log.info("  Bias:   %s", job.bias_dir or "(keine)")
+        log.info("  Calib-Frames sind im ZIP enthalten (keine lokalen Pfade nötig)")
 
         # Output-Verzeichnis sicherstellen
         Path(job.work_output).mkdir(parents=True, exist_ok=True)
@@ -383,10 +380,6 @@ async def _run_pixinsight(job: Job) -> None:
             "infoFile":  str(info_file),
             "wbppPath":  wbpp_path,
             "mode":      job.mode,
-            "calibDir":  job.calibration_dir,
-            "flatsDir":  job.flats_dir,
-            "darksDir":  job.darks_dir,
-            "biasDir":   job.bias_dir,
         }
         config_path.write_text(json.dumps(config, indent=2))
         log.info("  Config: %s", config_path)
@@ -526,10 +519,6 @@ async def process(
     file: UploadFile = File(..., description="ZIP mit RAW-Frames (Lights/Darks/Flats/Bias)"),
     frame_info: str = Form(default="{}", description="JSON mit Frame-Metadaten"),
     mode: str = Form(default="wbpp", description="Processing-Modus: wbpp|fastbatch|shell_sim"),
-    calibration_dir: str = Form(default="", description="Legacy: Pfad zu Flats/Darks/Bias auf dem Mac"),
-    flats_dir: str = Form(default="", description="Pfad zu Flats auf dem Mac"),
-    darks_dir: str = Form(default="", description="Pfad zu Darks auf dem Mac"),
-    bias_dir: str = Form(default="", description="Pfad zu Bias auf dem Mac"),
     token: str = Form(default=""),
 ):
     """Nimmt ein ZIP mit RAW-Frames entgegen, entpackt es lokal und startet
@@ -600,15 +589,6 @@ async def process(
              len(raw_files), counts["light"], counts["dark"],
              counts["flat"], counts["bias"], counts["darkflat"])
 
-    if calibration_dir:
-        log.info("  Calibration-Dir (legacy): %s", calibration_dir)
-    if flats_dir:
-        log.info("  Flats-Dir:  %s", flats_dir)
-    if darks_dir:
-        log.info("  Darks-Dir:  %s", darks_dir)
-    if bias_dir:
-        log.info("  Bias-Dir:   %s", bias_dir)
-
     job = Job(
         id=job_id,
         work_input=str(input_dir),
@@ -616,10 +596,10 @@ async def process(
         result_zip="",
         frame_info=info,
         mode=mode,
-        calibration_dir=calibration_dir,
-        flats_dir=flats_dir,
-        darks_dir=darks_dir,
-        bias_dir=bias_dir,
+        calibration_dir="",
+        flats_dir="",
+        darks_dir="",
+        bias_dir="",
     )
     _jobs[job_id] = job
 
@@ -639,10 +619,6 @@ async def process(
         "status": "queued",
         "input_files": len(raw_files),
         "mode": mode,
-        "calibration_dir": calibration_dir or None,
-        "flats_dir": flats_dir or None,
-        "darks_dir": darks_dir or None,
-        "bias_dir": bias_dir or None,
     }
 
 

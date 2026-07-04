@@ -938,14 +938,14 @@ function SetupRow({ s, allFilters, reload }: { s: SetupT; allFilters: Filt[]; re
       </div>
       {/* Calibration-Directories */}
       <div className="mt-2 border-t border-white/5 pt-2">
-        <span className="text-[11px] text-slate-500 shrink-0">Calib-Frames (Pfade auf dem Mac):</span>
+        <span className="text-[11px] text-slate-500 shrink-0">Calib-Frames (Pfade auf dem NAS, relativ zum Archiv-Root):</span>
         {editingCalib ? (
           <div className="mt-1.5 space-y-1.5">
             <div className="flex items-center gap-2">
               <span className="w-12 text-[11px] text-slate-400 shrink-0">Flats</span>
               <input
                 className="flex-1 rounded border border-white/10 bg-black/30 px-2 py-1 text-xs text-slate-200"
-                placeholder="/Pfad/auf/Mac/Flats"
+                placeholder="Flats/ relativ zum NAS-Root"
                 value={flatsDir}
                 onChange={(e) => setFlatsDir(e.target.value)}
               />
@@ -954,7 +954,7 @@ function SetupRow({ s, allFilters, reload }: { s: SetupT; allFilters: Filt[]; re
               <span className="w-12 text-[11px] text-slate-400 shrink-0">Darks</span>
               <input
                 className="flex-1 rounded border border-white/10 bg-black/30 px-2 py-1 text-xs text-slate-200"
-                placeholder="/Pfad/auf/Mac/Darks"
+                placeholder="Darks/ relativ zum NAS-Root"
                 value={darksDir}
                 onChange={(e) => setDarksDir(e.target.value)}
               />
@@ -963,7 +963,7 @@ function SetupRow({ s, allFilters, reload }: { s: SetupT; allFilters: Filt[]; re
               <span className="w-12 text-[11px] text-slate-400 shrink-0">Bias</span>
               <input
                 className="flex-1 rounded border border-white/10 bg-black/30 px-2 py-1 text-xs text-slate-200"
-                placeholder="/Pfad/auf/Mac/Bias"
+                placeholder="Bias/ relativ zum NAS-Root"
                 value={biasDir}
                 onChange={(e) => setBiasDir(e.target.value)}
               />

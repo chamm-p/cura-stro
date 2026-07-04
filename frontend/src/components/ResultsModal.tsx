@@ -352,7 +352,7 @@ export default function ResultsModal({
                     {/* Calibration-Directories */}
                     <div className="rounded-lg border border-white/10 bg-black/30 p-3">
                       <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-slate-300">
-                        <Files className="h-3.5 w-3.5" /> Calibration-Frames (Mac-Pfade)
+                        <Files className="h-3.5 w-3.5" /> Calibration-Frames (NAS-Pfade)
                       </div>
                       {precheck.calibration_dir.configured ? (
                         <div className="space-y-1">

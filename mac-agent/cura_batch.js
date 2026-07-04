@@ -18,13 +18,9 @@
  *   - ImageIntegration (Stacking mit Signal-Gewichtung)
  *   - Drizzle (optional)
  *
- * WBPP erzeugt pro Filter/Gruppe einen Master-Frame und legt die Ergebnisse
- * (kalibrierte Frames, ausgerichtete Frames, Master-Integration) in einer
- * strukturierten Ordner-Hierarchie ab.
- *
- * Nach WBPP kann der Nutzer in PixInsight manuell weiterarbeiten
- * (Histogramm, Deconvolution, NoiseReduction, ColorCalibration, etc.).
- * cura-stro setzt den Status auf 'vorbereitet' — nicht 'entwickelt'.
+ * Alle Frames (Lights + Flats/Darks/Bias) liegen bereits im Input-Verzeichnis
+ * (vom Backend per SMB vom NAS geholt und ins ZIP gepackt). WBPP erkennt den
+ * Frame-Typ automatisch am Dateinamen-Präfix (Light_, Dark_, Flat_, Bias_).
  *
  * Fallback: Falls WBPP nicht gefunden wird, wird ein vereinfachter
  * manueller Durchlauf (IC → SA → II) ausgeführt.
@@ -41,10 +37,6 @@ var outputDir = "";
 var infoFile = "";
 var wbppPath = "";
 var mode = "wbpp";
-var calibDir = "";   // Legacy: alle Calib-Frames in einem Verzeichnis
-var flatsDir = "";   // Separate Verzeichnisse
-var darksDir = "";
-var biasDir = "";
 
 if (typeof CURA_CONFIG_PATH !== "undefined" && CURA_CONFIG_PATH && !CURA_CONFIG_PATH.isEmpty()) {
     // Aufruf durch Mac-Agent: Config aus JSON-Datei lesen
@@ -57,10 +49,6 @@ if (typeof CURA_CONFIG_PATH !== "undefined" && CURA_CONFIG_PATH && !CURA_CONFIG_
         infoFile  = config.infoFile  || "";
         wbppPath  = config.wbppPath  || "";
         mode      = config.mode      || "wbpp";
-        calibDir  = config.calibDir  || "";
-        flatsDir  = config.flatsDir  || "";
-        darksDir  = config.darksDir  || "";
-        biasDir   = config.biasDir   || "";
     } catch (e) {
         console.criticalln("Fehler beim Lesen der Config-Datei: " + e);
         throw e;
@@ -80,14 +68,6 @@ if (typeof CURA_CONFIG_PATH !== "undefined" && CURA_CONFIG_PATH && !CURA_CONFIG_
             wbppPath = arg.substring(7);
         else if (arg.startsWith("--mode="))
             mode = arg.substring(7);
-        else if (arg.startsWith("--calib="))
-            calibDir = arg.substring(8);
-        else if (arg.startsWith("--flats="))
-            flatsDir = arg.substring(8);
-        else if (arg.startsWith("--darks="))
-            darksDir = arg.substring(8);
-        else if (arg.startsWith("--bias="))
-            biasDir = arg.substring(7);
     }
 }
 
@@ -101,10 +81,7 @@ console.writeln("Input:  " + inputDir);
 console.writeln("Output: " + outputDir);
 console.writeln("WBPP:   " + (wbppPath.isEmpty() ? "(nicht angegeben)" : wbppPath));
 console.writeln("Mode:   " + mode);
-console.writeln("Calib:  " + (calibDir.isEmpty() ? "(keine)" : calibDir));
-console.writeln("Flats:  " + (flatsDir.isEmpty() ? "(keine)" : flatsDir));
-console.writeln("Darks:  " + (darksDir.isEmpty() ? "(keine)" : darksDir));
-console.writeln("Bias:   " + (biasDir.isEmpty() ? "(keine)" : biasDir));
+console.writeln("Calib-Frames sind im Input-Verzeichnis enthalten (keine separaten Pfade nötig)");
 
 // ─── Frame-Info laden (optional) ───
 var frameInfo = {};
@@ -168,81 +145,12 @@ var wbppSuccess = false;
 if (!wbppPath.isEmpty() && File.exists(wbppPath)) {
     console.writeln("\n--- WeightedBatchPreProcessing (WBPP) ---");
     try {
-        // WBPP als externes Skript laden und ausführen
-        // WBPP erwartet die Frames in Unterverzeichnissen oder mit passenden
-        // Dateinamen. ASIAir-Dateien folgen der Konvention:
-        //   Light_<obj>_<exp>s_Bin<n>[_<filter>]_<date>-<time>_<seq>.fit
-        //   Dark_<obj>_...
-        //   Flat_<obj>_...
-        //   Bias_<obj>_...
-        //
-        // WBPP erkennt Frame-Typen automatisch anhand des Dateinamen-Präfixes.
-
-        // WBPP-Konfiguration über Environment-Variablen / Parameter
-        // WBPP kann per Skript konfiguriert werden:
-        var wbppScript = File.readTextFile(wbppPath);
-
-        // WBPP-Parameter setzen (über globale Variablen vor dem Laden)
-        // Diese Variablen werden von WBPP ausgewertet, wenn es geladen wird.
-        // Siehe WBPP-Dokumentation für alle Optionen.
-
-        // Output-Verzeichnis für WBPP setzen
-        params = {
-            outputDirectory: outputDir,
-            inputDirectory: inputDir,
-            // Diagnostik
-            generateDiagnostiData: false,
-            // Kalibrierung
-            masterBias: true,
-            masterDark: true,
-            masterFlat: true,
-            // Registrierung
-            starAlignment: true,
-            // Integration
-            imageIntegration: true,
-            // Local Normalization (empfohlen für gute Ergebnisse)
-            localNormalization: false,  // kann lange dauern
-            // Drizzle (nur für hochaufgelöste Daten)
-            drizzle: false,
-            // Rejection
-            rejection: "WinsorizedSigmaClip",
-            // Overwrite
-            overwriteExistingFiles: true,
-        };
-
-        // WBPP-Skript ausführen
-        // Hinweis: WBPP lädt seine eigene UI; im headless-Modus wird die
-        // Kommandozeilen-Version verwendet.
+        // Alle Frames (Lights + Flats/Darks/Bias) liegen bereits im Input-Verzeichnis.
+        // WBPP erkennt Frame-Typen automatisch am Dateinamen-Präfix:
+        //   Light_*.fit, Dark_*.fit, Flat_*.fit, Bias_*.fit
         console.writeln("Starte WBPP...");
         console.writeln("Input-Verzeichnis: " + inputDir);
         console.writeln("Output-Verzeichnis: " + outputDir);
-
-        // Calibration-Frames in das Input-Verzeichnis kopieren, damit WBPP
-        // sie automatisch erkennt (WBPP nutzt Dateinamen-Präfixe).
-        var calibDirsToCopy = [
-            { path: flatsDir, label: "Flats" },
-            { path: darksDir, label: "Darks" },
-            { path: biasDir,  label: "Bias"  },
-        ];
-        if (!calibDir.isEmpty() && flatsDir.isEmpty() && darksDir.isEmpty() && biasDir.isEmpty()) {
-            calibDirsToCopy = [{ path: calibDir, label: "Calibration (legacy)" }];
-        }
-        for (var cd = 0; cd < calibDirsToCopy.length; ++cd) {
-            var cdir = calibDirsToCopy[cd].path;
-            var clabel = calibDirsToCopy[cd].label;
-            if (!cdir.isEmpty() && File.directoryExists(cdir)) {
-                console.writeln("Kopiere " + clabel + " in Input-Verzeichnis: " + cdir);
-                var calibFiles = listFiles(cdir);
-                for (var ci = 0; ci < calibFiles.length; ++ci) {
-                    if (isImageFile(calibFiles[ci])) {
-                        var destFile = inputDir + "/" + File.extractName(calibFiles[ci]) + "." + File.extractExtension(calibFiles[ci]);
-                        File.copy(calibFiles[ci], destFile);
-                    }
-                }
-            } else if (!cdir.isEmpty()) {
-                console.warningln(clabel + "-Verzeichnis nicht gefunden: " + cdir);
-            }
-        }
 
         // WBPP per ScriptEngine laden und ausführen
         var engine = new ScriptEngine;
@@ -270,35 +178,8 @@ if (!wbppPath.isEmpty() && File.exists(wbppPath)) {
 if (!wbppSuccess) {
     console.writeln("\n--- Manueller Durchlauf (IC → SA → II) ---");
 
-    // Dateien nach Frame-Typ sortieren (Hilfsfunktionen oben definiert)
+    // Alle Dateien im Input-Verzeichnis sammeln (Lights + Calib-Frames)
     var allFiles = listFiles(inputDir);
-
-    // Calibration-Frames aus den jeweiligen Verzeichnissen hinzufügen
-    // Separate Verzeichnisse (bevorzugt)
-    var calibDirs = [
-        { path: flatsDir, label: "Flats" },
-        { path: darksDir, label: "Darks" },
-        { path: biasDir,  label: "Bias"  },
-    ];
-    // Legacy-Fallback: calibDir für alle verwenden, wenn keine separaten gesetzt
-    if (!calibDir.isEmpty() && flatsDir.isEmpty() && darksDir.isEmpty() && biasDir.isEmpty()) {
-        calibDirs = [{ path: calibDir, label: "Calibration (legacy)" }];
-    }
-    for (var cd = 0; cd < calibDirs.length; ++cd) {
-        var cdir = calibDirs[cd].path;
-        var clabel = calibDirs[cd].label;
-        if (!cdir.isEmpty() && File.directoryExists(cdir)) {
-            console.writeln("Lade " + clabel + " aus: " + cdir);
-            var calibFiles = listFiles(cdir);
-            for (var ci = 0; ci < calibFiles.length; ++ci) {
-                if (isImageFile(calibFiles[ci])) {
-                    allFiles.push(calibFiles[ci]);
-                }
-            }
-        } else if (!cdir.isEmpty()) {
-            console.warningln(clabel + "-Verzeichnis nicht gefunden: " + cdir);
-        }
-    }
 
     var lights = [], darks = [], flats = [], biases = [], darkflats = [];
 
