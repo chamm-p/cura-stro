@@ -46,21 +46,44 @@ geplant → raw → in_bearbeitung → vorbereitet → entwickelt
 ### 1. Voraussetzungen
 
 - PixInsight ist auf dem Mac installiert
-- Python 3.10+
+- Python 3.10+ (auf dem Mac vorinstalliert, prüfe mit `python3 --version`)
 - Der Mac ist im selben Netzwerk wie das cura-stro-Backend
 
 ### 2. Installation
 
 ```bash
+# Repo klonen (falls noch nicht geschehen)
+git clone https://github.com/chamm-p/cura-stro.git
 cd cura-stro/mac-agent
+
+# Virtualenv erstellen (isoliert die Python-Abhängigkeiten)
 python3 -m venv .venv
+
+# Virtualenv aktivieren — WICHTIG: danach ist 'pip' verfügbar
 source .venv/bin/activate
+
+# Jetzt pip installieren (funktioniert nur im aktivierten venv!)
 pip install -r requirements.txt
+
+# Falls pip trotzdem nicht gefunden wird, alternativ:
+# python3 -m pip install -r requirements.txt
 ```
 
-### 3. Konfiguration
+> **Hinweis:** Nach `source .venv/bin/activate` siehst du `(.venv)` vorne
+> im Terminal-Prompt. Erst dann ist `pip` als Befehl verfügbar. Ohne aktives
+> venv musst du `python3 -m pip` statt `pip` verwenden.
 
-Umgebungsvariablen (in `.env` oder direkt beim Start):
+### 3. Token erzeugen (einmalig, shared mit Backend)
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Kopiere den ausgegebenen String — das ist dein `AGENT_TOKEN`.
+
+### 4. Konfiguration
+
+Umgebungsvariablen (direkt beim Start oder in einer `.env`-Datei neben `agent.py`):
 
 | Variable | Default | Beschreibung |
 |---|---|---|
@@ -72,28 +95,80 @@ Umgebungsvariablen (in `.env` oder direkt beim Start):
 | `WORK_DIR` | `~/cura-stro-jobs` | Temporäres Arbeitsverzeichnis |
 | `MAX_CONCURRENT` | `1` | Maximal gleichzeitige PixInsight-Prozesse |
 
-### 4. Start
+### 5. Start
 
 ```bash
-# Development
-python agent.py
+# Virtualenv aktivieren (falls noch nicht aktiv)
+source .venv/bin/activate
 
-# Mit Token
-AGENT_TOKEN="dein-shared-secret" python agent.py
+# Development (ohne Token — nur für Tests)
+python3 agent.py
 
-# Production (launchd-Daemon)
-cp com.cura-stro.agent.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.cura-stro.agent.plist
+# Mit Token (empfohlen)
+AGENT_TOKEN="dein-token-aus-schritt-3" python3 agent.py
+
+# Health-Check im Browser oder Terminal:
+#   Browser:  http://localhost:7777/health
+#   Terminal: curl http://localhost:7777/health
 ```
 
-### 5. Backend-Konfiguration
+Der Agent läuft jetzt und wartet auf Aufträge vom Backend.
 
-Im cura-stro Backend `.env`:
+### 6. Backend konfigurieren (auf dem Linux-Server)
+
+In der `.env` des cura-stro-Backends (z. B. `/opt/cura-stro/deploy/.env`):
 
 ```env
 PIXINSIGHT_AGENT_URL=http://<mac-ip>:7777
 PIXINSIGHT_AGENT_TOKEN=<gleicher-token-wie-auf-dem-mac>
 ```
+
+> Die `deploy/.env.example` enthält diese Zeilen bereits als Vorlage.
+> Ersetze `<mac-ip>` durch die IP-Adresse deines Mac im lokalen Netzwerk
+> (z. B. `192.168.1.42`) und den Token durch den aus Schritt 3.
+
+Danach das Backend neu starten.
+
+### 7. Verarbeitung auslösen
+
+1. cura-stro im Browser öffnen
+2. Zur **Verwaltung** (Manage-Seite)
+3. Eine Aufnahme mit Status **`raw`** anklicken → **Ergebnis-Modal**
+4. In der **PixInsight**-Sektion:
+   - Health-Check zeigt: Agent erreichbar? PixInsight gefunden?
+   - Button **"In PixInsight verarbeiten"** klicken
+5. Das Backend überträgt die RAW-Dateien als ZIP an den Mac, der Mac startet
+   PixInsight mit WBPP, das Backend pollt bis fertig und holt die Ergebnisse zurück
+6. Status wechselt auf **`vorbereitet`** — Master-Files liegen im
+   `Prepared/`-Ordner auf dem NAS
+
+### 8. Manuell weiterentwickeln
+
+- PixInsight manuell öffnen
+- Master-Files aus `Prepared/<Objekt>/<Gerät>/` laden
+- Bild entwickeln (Stretching, Rauschreduktion, Farbkalibrierung, etc.)
+- Fertiges Bild in `Developer/<Objekt>/<Gerät>/` speichern
+- Die Watch-Loop im Backend erkennt die Datei automatisch → Status **`entwickelt`**
+
+## Production (launchd-Daemon)
+
+Für dauerhaften Betrieb (startet automatisch beim Booten):
+
+```bash
+# 1. Agent installieren
+sudo mkdir -p /usr/local/bin/cura-stro-agent
+sudo cp agent.py cura_batch.js requirements.txt /usr/local/bin/cura-stro-agent/
+cd /usr/local/bin/cura-stro-agent
+sudo python3 -m venv .venv
+sudo .venv/bin/pip install -r requirements.txt
+
+# 2. plist anpassen (Token, Pfade) und installieren
+cp com.cura-stro.agent.plist ~/Library/LaunchAgents/
+# Token in der plist anpassen!
+launchctl load ~/Library/LaunchAgents/com.cura-stro.agent.plist
+```
+
+Logs: `/tmp/cura-stro-agent.log` und `/tmp/cura-stro-agent.err`
 
 ## API-Endpunkte
 
@@ -132,7 +207,7 @@ Der Standard-Pfad für WBPP auf dem Mac ist:
 
 Falls dein WBPP woanders liegt, setze `WBPP_SCRIPT`:
 ```bash
-WBPP_SCRIPT="/pfad/zu/WeightedBatchPreProcessing.js" python agent.py
+WBPP_SCRIPT="/pfad/zu/WeightedBatchPreProcessing.js" python3 agent.py
 ```
 
 ## Sicherheit
@@ -142,3 +217,13 @@ WBPP_SCRIPT="/pfad/zu/WeightedBatchPreProcessing.js" python agent.py
   erreichen kann (Firewall / VLAN)
 - Temp-Dateien werden in `WORK_DIR` gespeichert und können mit
   `DELETE /jobs/{job_id}` aufgeräumt werden
+
+## Fehlerbehebung
+
+| Problem | Lösung |
+|---|---|
+| `pip: command not found` | Virtualenv nicht aktiviert: `source .venv/bin/activate`, oder `python3 -m pip` statt `pip` verwenden |
+| `python3: command not found` | Python nicht installiert: `brew install python` oder Xcode Command Line Tools: `xcode-select --install` |
+| Health-Check: `pixinsight_found: false` | `PIXINSIGHT_BIN` Pfad stimmt nicht — prüfe mit `ls /Applications/PixInsight/PixInsight.app/Contents/MacOS/PixInsight` |
+| Backend kann Agent nicht erreichen | Mac-Firewall blockiert Port 7777 — Systemeinstellungen → Netzwerk → Firewall, oder IP/Port in `.env` falsch |
+| `ModuleNotFoundError: No module named 'fastapi'` | `pip install -r requirements.txt` im aktivierten venv ausführen |
