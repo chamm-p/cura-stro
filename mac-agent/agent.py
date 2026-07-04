@@ -344,6 +344,34 @@ def _print_pi_log(log_file: Path, max_lines: int = 200) -> None:
         log.warning("  Konnte PixInsight-Log nicht lesen: %s", e)
 
 
+def _kill_existing_pixinsight() -> None:
+    """Killt alle laufenden PixInsight-Prozesse vor einem headless-Batch.
+    Verhindert 'Yielded execution to running instance' — das Skript wuerde
+    sonst an eine bestehende Instanz delegiert und nie ausgefuehrt."""
+    try:
+        result = subprocess.run(
+            ['pgrep', '-f', 'PixInsight'],
+            capture_output=True, text=True, timeout=5,
+        )
+        pids = [p.strip() for p in result.stdout.strip().split('\n') if p.strip()]
+        # Eigene PID ausschliessen (falls der Agent-Pfad 'PixInsight' enthaelt)
+        my_pid = os.getpid()
+        pids = [p for p in pids if p != str(my_pid)]
+        if pids:
+            log.info('  Killte %d laufende(n) PixInsight-Prozess(e): %s', len(pids), ', '.join(pids))
+            for pid in pids:
+                try:
+                    subprocess.run(['kill', '-9', pid], timeout=5)
+                except Exception:
+                    pass
+            import time
+            time.sleep(2)
+    except FileNotFoundError:
+        pass  # pgrep nicht verfuegbar (nicht macOS)
+    except Exception as e:
+        log.warning('  Konnte PixInsight-Prozesse nicht killen: %s', e)
+
+
 async def _run_pixinsight(job: Job) -> None:
     """Führt PixInsight headless mit dem Batch-Skript aus."""
     async with _semaphore:
@@ -379,9 +407,13 @@ async def _run_pixinsight(job: Job) -> None:
         wrapper_path.write_text(wrapper_js)
         log.info("  Wrapper: %s (cura_batch.js inlined, Config als JS-Variablen)", wrapper_path)
 
-        # PixInsight CLI Aufruf: nur -r=<wrapper> --force-exit
+        # Laufende PixInsight-Instanzen killen (verhindert Yielding)
+        _kill_existing_pixinsight()
+
+        # PixInsight CLI Aufruf: -n erzwingt neue Instanz, --force-exit killt danach
         cmd = [
             PIXINSIGHT_BIN,
+            "-n",                       # Neue Instanz erzwingen (kein Yielding)
             f"-r={wrapper_path}",
             "--force-exit",
         ]
@@ -474,9 +506,22 @@ async def _startup():
 async def health():
     pixinsight_ok = Path(PIXINSIGHT_BIN).exists()
     script_ok = Path(BATCH_SCRIPT).exists()
+    # Pruefen, ob PixInsight bereits laeuft (GUI oder hängengebliebener Prozess)
+    pixinsight_running = False
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "PixInsight"],
+            capture_output=True, text=True, timeout=5,
+        )
+        pids = [p.strip() for p in result.stdout.strip().split("\n") if p.strip()]
+        pids = [p for p in pids if p != str(os.getpid())]
+        pixinsight_running = len(pids) > 0
+    except Exception:
+        pass
     return {
         "status": "ok" if pixinsight_ok and script_ok else "degraded",
         "pixinsight_found": pixinsight_ok,
+        "pixinsight_running": pixinsight_running,
         "pixinsight_path": PIXINSIGHT_BIN,
         "batch_script_found": script_ok,
         "batch_script_path": BATCH_SCRIPT,

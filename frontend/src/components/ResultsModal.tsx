@@ -24,8 +24,9 @@ interface PrecheckResult {
   estimated_size_mb: number
   calibration_dir: { configured: boolean; flats_dir: string | null; darks_dir: string | null; bias_dir: string | null }
   agent: {
-    available: boolean; pixinsight_found: boolean; shell_sim_available: boolean
-    wbpp_script_found: boolean; fastbatch_script_found: boolean; active_jobs: number
+    available: boolean; pixinsight_found: boolean; pixinsight_running: boolean
+    shell_sim_available: boolean; wbpp_script_found: boolean; fastbatch_script_found: boolean
+    active_jobs: number
   }
   frame_info: {
     object_name: string; device_name: string; total_subs: number

@@ -826,6 +826,7 @@ async def precheck(
     agent_info: dict[str, Any] = {
         "available": agent.get("available", False),
         "pixinsight_found": agent.get("pixinsight_found", False),
+        "pixinsight_running": agent.get("pixinsight_running", False),
         "shell_sim_available": agent.get("shell_sim_available", False),
         "wbpp_script_found": agent.get("wbpp_script_found", False),
         "fastbatch_script_found": agent.get("fastbatch_script_found", False),
@@ -848,6 +849,12 @@ async def precheck(
             "level": "warning",
             "code": "pixinsight_not_found",
             "message": "Agent erreichbar, aber PixInsight nicht gefunden — nur Shell-Simulation verfügbar.",
+        })
+    elif agent.get("pixinsight_running"):
+        warnings.append({
+            "level": "warning",
+            "code": "pixinsight_running",
+            "message": "PixInsight läuft bereits (GUI oder hängengebliebener Prozess). Der Agent killt es vor dem Batch — ungespeicherte GUI-Arbeiten gehen verloren.",
         })
 
     # 4. Frame-Info für Anzeige

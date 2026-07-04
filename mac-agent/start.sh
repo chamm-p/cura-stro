@@ -89,12 +89,18 @@ load_token() {
 }
 
 # ─── Prüfen ob Agent bereits läuft ───
+# Primär: Port-basiert (zuverlässig — auch wenn pgrep versagt)
+# Fallback: pgrep nach agent.py-Pfad
 is_running() {
-    # Alle Python-Prozesse suchen, die agent.py ausführen
+    # Port prüfen (zuverlässigste Methode)
+    if lsof -ti ":$PORT" >/dev/null 2>&1; then
+        return 0
+    fi
+    # Fallback: pgrep
     if pgrep -f "$AGENT" >/dev/null 2>&1; then
         return 0
     fi
-    # Fallback: PID-Datei prüfen
+    # Fallback: PID-Datei
     if [ -f "$PID_FILE" ]; then
         local pid
         pid="$(cat "$PID_FILE" 2>/dev/null || echo '')"
@@ -106,8 +112,14 @@ is_running() {
 }
 
 get_pid() {
-    # Primär: pgrep nach agent.py-Pfad
+    # Primär: Port-basiert
     local pid
+    pid=$(lsof -ti ":$PORT" 2>/dev/null | head -1)
+    if [ -n "$pid" ]; then
+        echo "$pid"
+        return
+    fi
+    # Fallback: pgrep
     pid=$(pgrep -f "$AGENT" 2>/dev/null | head -1)
     if [ -n "$pid" ]; then
         echo "$pid"
@@ -137,32 +149,53 @@ do_health() {
 }
 
 # ─── Agent stoppen ───
+# Killt ALLE Prozesse auf dem Port + alle agent.py-Prozesse.
+# Kein tee mehr — direktes Redirect beim Start.
 do_stop() {
     header "Agent stoppen"
     local stopped_any=false
 
-    # Alle Prozesse finden, die agent.py ausführen
-    local pids
-    pids=$(pgrep -f "$AGENT" 2>/dev/null || echo '')
-    if [ -n "$pids" ]; then
-        echo "$pids" | while read -r pid; do
+    # 1. Alle Prozesse auf dem Port finden und killen
+    local port_pids
+    port_pids=$(lsof -ti ":$PORT" 2>/dev/null || echo '')
+    if [ -n "$port_pids" ]; then
+        echo "$port_pids" | while read -r pid; do
             kill "$pid" 2>/dev/null || true
-            echo "  SIGTERM → PID $pid"
+            echo "  SIGTERM → PID $pid (Port $PORT)"
         done
         sleep 2
-        # Prüfen ob noch welche laufen → SIGKILL
-        pids=$(pgrep -f "$AGENT" 2>/dev/null || echo '')
-        if [ -n "$pids" ]; then
+        # Hart killen, falls noch am Leben
+        port_pids=$(lsof -ti ":$PORT" 2>/dev/null || echo '')
+        if [ -n "$port_pids" ]; then
             warn "SIGTERM ignoriert — sende SIGKILL"
-            echo "$pids" | while read -r pid; do
+            echo "$port_pids" | while read -r pid; do
                 kill -9 "$pid" 2>/dev/null || true
-                echo "  SIGKILL → PID $pid"
+                echo "  SIGKILL → PID $pid (Port $PORT)"
             done
         fi
         stopped_any=true
     fi
 
-    # Auch PID-Datei-basierten Prozess killen (falls pgrep ihn nicht fand)
+    # 2. Alle agent.py-Prozesse killen (Fallback, falls Port nicht belegt)
+    local agent_pids
+    agent_pids=$(pgrep -f "$AGENT" 2>/dev/null || echo '')
+    if [ -n "$agent_pids" ]; then
+        echo "$agent_pids" | while read -r pid; do
+            kill "$pid" 2>/dev/null || true
+            echo "  SIGTERM → PID $pid (agent.py)"
+        done
+        sleep 1
+        agent_pids=$(pgrep -f "$AGENT" 2>/dev/null || echo '')
+        if [ -n "$agent_pids" ]; then
+            echo "$agent_pids" | while read -r pid; do
+                kill -9 "$pid" 2>/dev/null || true
+                echo "  SIGKILL → PID $pid (agent.py)"
+            done
+        fi
+        stopped_any=true
+    fi
+
+    # 3. PID-Datei aufräumen
     if [ -f "$PID_FILE" ]; then
         local fpid
         fpid="$(cat "$PID_FILE" 2>/dev/null || echo '')"
@@ -254,11 +287,10 @@ do_start() {
     [ -n "$sim_note" ] && echo -e "$sim_note"
     echo ""
 
-    # Starten mit Process-Substitution (keine Pipeline!).
-    # Dadurch ist $! die PID des Python-Prozesses, nicht von tee.
-    # tee läuft in einer Subshell und beendet sich selbst, wenn Python
-    # die Pipe schließt (beim Exit).
-    "$VENV_PY" "$AGENT" > >(tee "$LOG_FILE") 2>&1 &
+    # Starten mit DIREKTEM Redirect (kein tee, keine Process-Substitution).
+    # Dadurch ist $! zuverlässig die PID des Python-Prozesses.
+    # tee verursachte doppelte Prozesse und unzuverlässiges PID-Tracking.
+    "$VENV_PY" "$AGENT" >> "$LOG_FILE" 2>&1 &
     local pid=$!
     echo "$pid" > "$PID_FILE"
     info "Agent gestartet (PID $pid)"
@@ -268,6 +300,7 @@ do_start() {
     if do_health 2>/dev/null; then
         echo ""
         info "Agent ist bereit! Health-Check OK."
+        echo "  Logs:  ./start.sh --logs"
     else
         warn "Agent startet noch — Health-Check in ein paar Sekunden wiederholen:"
         echo "  ./start.sh --check"
