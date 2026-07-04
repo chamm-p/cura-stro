@@ -46,6 +46,25 @@ if (!File.directoryExists(outputDir)) {
     File.createDirectory(outputDir, true);
 }
 
+// ─── Datei-Logging ───
+// PixInsight schreibt die Script-Console auf macOS in die GUI-Konsole, NICHT
+// nach stdout. Damit der Mac-Agent (und wir) sehen, was das Skript tut bzw.
+// woran es scheitert, schreiben wir zusätzlich in eine Logdatei im Output.
+var CURA_LOG = outputDir + "/cura_batch.log";
+var CURA_LOGBUF = "";
+function flog(msg) {
+    console.writeln(msg);
+    CURA_LOGBUF += msg + "\n";
+}
+function flush() {
+    try { File.writeTextFile(CURA_LOG, CURA_LOGBUF); } catch (e) { /* ignore */ }
+}
+flog("=== cura-stro Batch (Script gestartet) ===");
+flog("Input:  " + inputDir);
+flog("Output: " + outputDir);
+flog("Mode:   " + mode);
+flush();
+
 // ─── Hilfsfunktionen ───
 
 function findImageFiles(dir) {
@@ -103,8 +122,17 @@ function classifyFrame(filepath) {
     return "light";
 }
 
+// ─── Ab hier: alles in try/catch, damit Fehler im Datei-Log landen ───
+try {
+
 // ─── Alle Dateien sammeln ───
 var allFiles = findImageFilesRecursive(inputDir);
+
+flog("searchDirectory fand " + allFiles.length + " Bilddatei(en) unter " + inputDir);
+for (var _f = 0; _f < allFiles.length; ++_f) {
+    flog("  [" + _f + "] " + allFiles[_f]);
+}
+flush();
 
 var lights = [], darks = [], flats = [], biases = [], darkflats = [];
 
@@ -118,12 +146,14 @@ for (var i = 0; i < allFiles.length; ++i) {
     else                           lights.push(allFiles[i]);
 }
 
-console.writeln("Gefunden: " + lights.length + " Lights, " +
+flog("Gefunden: " + lights.length + " Lights, " +
     darks.length + " Darks, " + flats.length + " Flats, " +
     biases.length + " Bias, " + darkflats.length + " DarkFlats");
+flush();
 
 if (lights.length === 0) {
-    console.criticalln("Keine Light-Frames gefunden — Abbruch");
+    flog("KRITISCH: Keine Light-Frames gefunden — Abbruch");
+    flush();
     throw new Error("No light frames");
 }
 
@@ -238,7 +268,8 @@ masterDark = buildMaster(darks, "Dark", calDir + "/master_dark.xisf", false);
 masterFlat = buildMaster(flats, "Flat", calDir + "/master_flat.xisf", true);
 
 // ─── 2. ImageCalibration ───
-console.writeln("\n--- ImageCalibration ---");
+flog("\n--- ImageCalibration ---");
+flush();
 
 var icInputs = [];
 for (var i = 0; i < lights.length; ++i) {
@@ -304,7 +335,8 @@ if (ic.outputData) {
 if (calibratedLights.length === 0) {
     calibratedLights = findImageFiles(calDir);
 }
-console.writeln("Kalibriert: " + calibratedLights.length + " Frames");
+flog("Kalibriert: " + calibratedLights.length + " Frames");
+flush();
 
 if (calibratedLights.length === 0) {
     console.criticalln("ImageCalibration lieferte keine Ergebnisse — Abbruch");
@@ -312,7 +344,8 @@ if (calibratedLights.length === 0) {
 }
 
 // ─── 3. StarAlignment ───
-console.writeln("\n--- StarAlignment ---");
+flog("\n--- StarAlignment ---");
+flush();
 
 var saInputs = [];
 for (var i = 0; i < calibratedLights.length; ++i) {
@@ -415,7 +448,8 @@ if (sa.outputData) {
 if (alignedLights.length === 0) {
     alignedLights = findImageFiles(alignedDir);
 }
-console.writeln("Ausgerichtet: " + alignedLights.length + " Frames");
+flog("Ausgerichtet: " + alignedLights.length + " Frames");
+flush();
 
 if (alignedLights.length === 0) {
     console.criticalln("StarAlignment lieferte keine Ergebnisse — Abbruch");
@@ -423,7 +457,8 @@ if (alignedLights.length === 0) {
 }
 
 // ─── 4. ImageIntegration (Stack) ───
-console.writeln("\n--- ImageIntegration ---");
+flog("\n--- ImageIntegration ---");
+flush();
 
 var objName = "result";
 if (frameInfo && frameInfo.object_name) {
@@ -528,6 +563,20 @@ try {
     intWin.forceClose();
 }
 
-console.writeln("\n=== Batch abgeschlossen ===");
-console.writeln("Output-Verzeichnis: " + outputDir);
-console.writeln("Master: " + masterPath);
+flog("\n=== Batch abgeschlossen ===");
+flog("Output-Verzeichnis: " + outputDir);
+flog("Master: " + masterPath);
+flush();
+
+} catch (cura_err) {
+    // Jeder Fehler landet hier UND im Datei-Log — sonst nur unsichtbar in der
+    // PixInsight-GUI-Konsole.
+    flog("\n!!! FATAL: " + cura_err);
+    if (cura_err && cura_err.stack) flog(cura_err.stack);
+    flush();
+    try {
+        File.writeTextFile(outputDir + "/cura_batch_error.log",
+            String(cura_err) + "\n" + (cura_err && cura_err.stack ? cura_err.stack : ""));
+    } catch (e2) { /* ignore */ }
+    throw cura_err;   // Exit-Code != 0 für den Agent erzwingen
+}

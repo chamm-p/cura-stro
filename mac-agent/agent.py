@@ -344,6 +344,35 @@ def _print_pi_log(log_file: Path, max_lines: int = 200) -> None:
         log.warning("  Konnte PixInsight-Log nicht lesen: %s", e)
 
 
+def _print_batch_log(output_dir: Path) -> None:
+    """Gibt das von cura_batch.js geschriebene Datei-Log auf der Agent-Konsole
+    aus. Das ist die EINZIGE Quelle für Script-Ausgaben/Fehler — PixInsight
+    schickt die PJSR-Console auf macOS in die GUI, nicht nach stdout."""
+    batch_log = output_dir / "cura_batch.log"
+    err_log = output_dir / "cura_batch_error.log"
+    if batch_log.exists():
+        try:
+            content = batch_log.read_text(errors="replace").strip()
+            log.info("  --- cura_batch.js Log ---")
+            for line in content.split("\n"):
+                log.info("  JS | %s", line)
+            log.info("  --- Ende cura_batch.js Log ---")
+        except Exception as e:
+            log.warning("  Konnte cura_batch.js-Log nicht lesen: %s", e)
+    else:
+        log.warning("  KEIN cura_batch.js-Log gefunden (%s) — Skript wurde "
+                    "vermutlich gar nicht ausgeführt (PixInsight-Aufruf/Parse-"
+                    "Fehler) oder Output-Verzeichnis stimmt nicht.", batch_log)
+    if err_log.exists():
+        try:
+            log.error("  --- cura_batch.js FEHLER ---")
+            for line in err_log.read_text(errors="replace").strip().split("\n"):
+                log.error("  JS-ERR | %s", line)
+            log.error("  --- Ende cura_batch.js FEHLER ---")
+        except Exception:
+            pass
+
+
 def _kill_existing_pixinsight() -> None:
     """Killt alle laufenden PixInsight-Prozesse vor einem headless-Batch.
     Verhindert 'Yielded execution to running instance' — das Skript wuerde
@@ -434,6 +463,9 @@ async def _run_pixinsight(job: Job) -> None:
 
             # PixInsight-Log auf Agent-Konsole ausgeben (für Debugging)
             _print_pi_log(log_file)
+            # Script-eigenes Log (cura_batch.js schreibt es, weil die PJSR-
+            # Console auf macOS in die GUI geht und NICHT nach stdout).
+            _print_batch_log(Path(job.work_output))
 
             if rc == 0:
                 out_path = Path(job.work_output)
