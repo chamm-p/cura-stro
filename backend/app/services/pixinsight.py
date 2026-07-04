@@ -1,24 +1,37 @@
-"""PixInsight-Integration — triggert den Mac-Agent für Batch-Verarbeitung.
+"""PixInsight-Integration — Backend als File-Broker.
 
 Der Mac-Agent (mac-agent/agent.py) läuft auf dem Mac, auf dem PixInsight
-installiert ist. Er nimmt Jobs per HTTP entgegen, startet PixInsight headless
-und meldet Status zurück.
+installiert ist. Der Mac braucht **keinen SMB-Mount** — alle Dateien werden
+über HTTP transferiert:
 
-Der cura-stro-Backend ruft den Agent auf, sobald der Nutzer eine Observation
-"verarbeiten" will. Der Agent kennt die Pfade (NAS-Mount auf dem Mac) und
-schreibt die Ergebnisse direkt ins Developer-Verzeichnis — wo der Watch-Loop
-(results.py) sie automatisch erkennt.
+    1. Backend liest RAW-Dateien vom NAS (Storage-Abstraktion)
+    2. Backend zippt die RAW-Dateien in ein temporäres Verzeichnis
+    3. Backend lädt das ZIP per multipart-POST an den Mac-Agent hoch
+    4. Mac-Agent entpackt, startet PixInsight/WBPP headless
+    5. Mac-Agent zippt die Ergebnisse
+    6. Backend lädt Ergebnis-ZIP per GET /results/{job_id} herunter
+    7. Backend entpackt und schreibt auf NAS unter Prepared/<Obj>/<Ger>/
+    8. Status → 'vorbereitet' (WBPP fertig, manuelle Entwicklung offen)
+
+Der Nutzer kann dann in PixInsight manuell weiterarbeiten und das fertige
+Bild später in den Developer-Ordner legen → Watch-Loop → Status 'entwickelt'.
 
 Status-Fluss:
-    raw → in_bearbeitung → (Watch-Loop erkennt Ergebnis) → entwickelt
+    raw → in_bearbeitung → vorbereitet → (manuelle Entwicklung) → entwickelt
 """
 
 from __future__ import annotations
 
 import asyncio
+import io
+import json
 import logging
+import os
+import shutil
+import tempfile
 import uuid
-from datetime import datetime, timezone
+import zipfile
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -33,6 +46,10 @@ from app.services import archive
 
 logger = logging.getLogger("uvicorn.error")
 _cfg = get_settings()
+
+# Verzeichnisname für WBPP-Ergebnisse (Master-Files, kalibrierte Frames).
+# Liegen im Archiv unter Prepared/<Objekt>/<Gerät>/.
+PREPARED_FOLDER = "Prepared"
 
 
 async def _agent_url(path: str = "") -> str:
@@ -53,10 +70,10 @@ async def raw_reldir(db: AsyncSession, user: User, obs: Observation) -> str:
     )
 
 
-async def developer_reldir(db: AsyncSession, user: User, obs: Observation) -> str:
-    """Relativer Pfad zum Developer-Verzeichnis der Aufnahme."""
+async def prepared_reldir(db: AsyncSession, user: User, obs: Observation) -> str:
+    """Relativer Pfad zum Prepared-Verzeichnis der Aufnahme."""
     return archive.reldir(
-        archive.folder_name(user, "Developer"),
+        PREPARED_FOLDER,
         await archive.object_label(db, obs),
         await archive.device_label(db, obs),
     )
@@ -80,7 +97,6 @@ async def _frame_summary(db: AsyncSession, obs: Observation) -> dict[str, Any]:
             "subs": slot["subs"],
             "exposures_s": sorted(slot["exposures_s"]),
         })
-    # Frame-Typen zählen
     frame_types = {}
     for s in subs:
         ft = (s.frame_type or "Light").lower()
@@ -94,48 +110,142 @@ async def _frame_summary(db: AsyncSession, obs: Observation) -> dict[str, Any]:
     }
 
 
+async def _collect_raw_files(
+    db: AsyncSession, user: User, obs: Observation
+) -> list[tuple[str, bytes]]:
+    """Liest alle RAW-Dateien einer Observation vom Storage und liefert
+    (filename, content) Paare."""
+    storage = archive.get_storage(user)
+    subs = await db.scalars(
+        select(SubFrame).where(SubFrame.observation_id == obs.id)
+    )
+    subs = list(subs)
+    if not subs:
+        raise ValueError("Keine Sub-Frames für diese Aufnahme — erst ASIAir-Daten importieren")
+
+    files: list[tuple[str, bytes]] = []
+    for sub in subs:
+        # archive_path ist der volle Pfad im Storage; rel ist relativ zum Root.
+        # Wir nutzen den originalen Dateinamen für das ZIP.
+        rel = sub.archive_path
+        if not rel:
+            continue
+        # Für LocalStorage ist archive_path ein absoluter Pfad; für SmbStorage
+        # ein UNC-Pfad. Wir nutzen storage.fetch, um die Datei lokal zu holen.
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=Path(sub.original_filename).suffix) as tmp:
+                tmp_path = tmp.name
+            await asyncio.to_thread(storage.fetch, _rel_from_archive_path(storage, sub), tmp_path)
+            with open(tmp_path, "rb") as f:
+                content = f.read()
+            files.append((sub.original_filename, content))
+        except Exception as e:
+            logger.warning("Konnte RAW-Datei nicht lesen: %s — %s", sub.original_filename, e)
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+    return files
+
+
+def _rel_from_archive_path(storage: archive.Storage, sub: SubFrame) -> str:
+    """Leitet den relativen Pfad für storage.fetch aus dem SubFrame ab."""
+    # SubFrame.archive_path ist der volle Pfad (full_path). Für fetch brauchen
+    # wir den relativen Pfad. Bei LocalStorage ist das root/rel.
+    # Wir bauen rel aus den bekannten Komponenten.
+    # Einfachster Weg: archive_path enthält den vollen Pfad — wir extrahieren
+    # den Teil nach dem Storage-Root.
+    full = sub.archive_path or ""
+    root = storage.display_root()
+    if full.startswith(root):
+        return full[len(root):].lstrip("/\\")
+    # Fallback: aus den Komponenten zusammenbauen
+    return full
+
+
+async def _create_zip(files: list[tuple[str, bytes]]) -> bytes:
+    """Erstellt ein ZIP im Speicher aus (filename, content) Paaren."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, content in files:
+            zf.writestr(name, content)
+    return buf.getvalue()
+
+
+async def _extract_zip(zip_bytes: bytes, dest_dir: Path) -> list[str]:
+    """Entpackt ein ZIP ins Zielverzeichnis und liefert die Dateinamen."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    names: list[str] = []
+    with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            # Pfad innerhalb des ZIP sichern entpacken
+            target = dest_dir / info.filename
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            names.append(info.filename)
+    return names
+
+
+async def _write_prepared_to_storage(
+    user: User, prepared_rel: str, local_dir: Path
+) -> list[str]:
+    """Schreibt die Ergebnis-Dateien vom lokalen Temp-Verzeichnis ins
+    Storage (NAS) unter Prepared/<Obj>/<Ger>/."""
+    storage = archive.get_storage(user)
+    # Verzeichnis im Storage anlegen
+    await asyncio.to_thread(storage.makedirs, prepared_rel)
+    written: list[str] = []
+    for f in sorted(local_dir.rglob("*")):
+        if not f.is_file():
+            continue
+        rel_within = f.relative_to(local_dir)
+        rel = f"{prepared_rel}/{rel_within}"
+        try:
+            await asyncio.to_thread(storage.put, rel, str(f))
+            written.append(str(rel_within))
+        except Exception as e:
+            logger.warning("Konnte Ergebnis-Datei nicht schreiben: %s — %s", rel_within, e)
+    return written
+
+
 async def trigger_batch(db: AsyncSession, user: User, obs: Observation) -> dict[str, Any]:
     """Triggert den Mac-Agent, um PixInsight für diese Observation zu starten.
 
-    Setzt voraus, dass der Mac das gleiche NAS-Volume gemountet hat wie das
-    Backend. Die Pfade (input_dir/output_dir) werden aus der Archiv-Konfig
-    des Nutzers abgeleitet.
+    Liest die RAW-Dateien vom NAS, zippt sie, lädt sie per HTTP an den Mac-Agent
+    hoch. Der Agent verarbeitet sie mit PixInsight/WBPP. Die Ergebnisse werden
+    später per poll_job_results abgeholt und ins Prepared-Verzeichnis geschrieben.
     """
     if not _cfg.pixinsight_agent_url:
         raise ValueError("PixInsight-Agent-URL nicht konfiguriert (PIXINSIGHT_AGENT_URL)")
 
-    # Prüfen, dass Subs vorhanden sind
-    sub_count = await db.scalar(
-        select(SubFrame).where(SubFrame.observation_id == obs.id)
-    )
-    if not sub_count:
-        raise ValueError("Keine Sub-Frames für diese Aufnahme — erst ASIAir-Daten importieren")
-
-    # Pfade für den Mac ableiten
-    # Der Mac kennt das NAS über seinen eigenen Mount-Point. Wir übergeben
-    # die *relativen* Pfade (RAW/<Obj>/<Ger>/) und der Mac setzt seinen
-    # Mount-Prefix davor — konfiguriert im Agent via NAS_MOUNT_PREFIX.
-    raw_rel = await raw_reldir(db, user, obs)
-    dev_rel = await developer_reldir(db, user, obs)
-
+    # Frame-Info sammeln
     frame_info = await _frame_summary(db, obs)
 
-    payload = {
-        "input_dir": raw_rel,
-        "output_dir": dev_rel,
-        "frame_info": frame_info,
-        "token": await _agent_token(),
-    }
+    # RAW-Dateien vom NAS lesen
+    raw_files = await _collect_raw_files(db, user, obs)
+    if not raw_files:
+        raise ValueError("Konnte keine RAW-Dateien vom Storage lesen")
+
+    # ZIP erstellen
+    zip_bytes = await _create_zip(raw_files)
 
     # Observation-Status setzen
     obs.status = "in_bearbeitung"
     obs.is_new = False
     await db.flush()
 
-    # Agent asynchron aufrufen (nicht-blockierend, Timeout für HTTP-Handshake)
+    # ZIP an Mac-Agent hochladen
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(await _agent_url("/process"), json=payload)
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            resp = await client.post(
+                await _agent_url("/process"),
+                files={"file": ("raw_frames.zip", zip_bytes, "application/zip")},
+                data={
+                    "frame_info": json.dumps(frame_info),
+                    "token": await _agent_token(),
+                },
+            )
             resp.raise_for_status()
             data = resp.json()
     except httpx.ConnectError:
@@ -154,9 +264,79 @@ async def trigger_batch(db: AsyncSession, user: User, obs: Observation) -> dict[
         "job_id": data.get("job_id"),
         "status": data.get("status", "queued"),
         "agent_url": _cfg.pixinsight_agent_url,
-        "input_dir": raw_rel,
-        "output_dir": dev_rel,
+        "input_files": data.get("input_files", len(raw_files)),
         "frame_info": frame_info,
+    }
+
+
+async def poll_job_results(
+    db: AsyncSession, user: User, obs: Observation, job_id: str
+) -> dict[str, Any]:
+    """Fragt den Job-Status beim Mac-Agent ab. Wenn der Job abgeschlossen ist,
+    lädt er die Ergebnis-ZIP herunter, entpackt sie und schreibt die Dateien
+    ins Prepared-Verzeichnis auf dem NAS. Setzt den Status auf 'vorbereitet'.
+    """
+    if not _cfg.pixinsight_agent_url:
+        raise ValueError("PixInsight-Agent-URL nicht konfiguriert")
+
+    token = await _agent_token()
+
+    # Status abfragen
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                await _agent_url(f"/status/{job_id}"),
+                params={"token": token},
+            )
+            resp.raise_for_status()
+            status_data = resp.json()
+    except httpx.ConnectError:
+        return {"status": "unknown", "error": "Agent nicht erreichbar"}
+    except httpx.HTTPStatusError as e:
+        return {"status": "error", "error": f"Agent: {e.response.status_code}"}
+
+    job_status = status_data.get("status", "unknown")
+
+    if job_status != "completed":
+        return {"job_id": job_id, "status": job_status, "details": status_data}
+
+    # Job abgeschlossen → Ergebnis-ZIP herunterladen
+    try:
+        async with httpx.AsyncClient(timeout=600.0) as client:
+            resp = await client.get(
+                await _agent_url(f"/results/{job_id}"),
+                params={"token": token},
+            )
+            resp.raise_for_status()
+            zip_bytes = resp.content
+    except httpx.ConnectError:
+        return {"status": "error", "error": "Agent nicht erreichbar für Download"}
+    except httpx.HTTPStatusError as e:
+        return {"status": "error", "error": f"Download fehlgeschlagen: {e.response.status_code}"}
+
+    # ZIP entpacken
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        extracted = await _extract_zip(zip_bytes, tmp_path)
+
+        if not extracted:
+            return {"status": "error", "error": "Ergebnis-ZIP ist leer"}
+
+        # Ergebnis-Dateien ins Storage (NAS) schreiben
+        prepared_rel = await prepared_reldir(db, user, obs)
+        written = await _write_prepared_to_storage(user, prepared_rel, tmp_path)
+
+    # Status auf 'vorbereitet' setzen
+    obs.status = "vorbereitet"
+    obs.is_new = False
+    await db.flush()
+
+    return {
+        "job_id": job_id,
+        "status": "vorbereitet",
+        "result_files": written,
+        "result_count": len(written),
+        "prepared_dir": prepared_rel,
     }
 
 

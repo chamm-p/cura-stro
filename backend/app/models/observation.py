@@ -11,8 +11,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
 # Status-Werte als String (keine PG-Enums → kein Casing-Gotcha):
-#   geplant · raw · in_bearbeitung · entwickelt
-STATUSES = ("geplant", "raw", "in_bearbeitung", "entwickelt")
+#   geplant · raw · in_bearbeitung · vorbereitet · entwickelt
+STATUSES = ("geplant", "raw", "in_bearbeitung", "vorbereitet", "entwickelt")
 
 
 class Observation(Base):

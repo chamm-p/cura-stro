@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 class ObservationCreate(BaseModel):
     catalog_object_id: str | None = None
     target_label: str | None = Field(default=None, max_length=160)
-    status: str = Field(default="geplant", pattern="^(geplant|raw|in_bearbeitung|entwickelt)$")
+    status: str = Field(default="geplant", pattern="^(geplant|raw|in_bearbeitung|vorbereitet|entwickelt)$")
     telescope_id: str | None = None
     planned_date: date | None = None
     rating: int | None = Field(default=None, ge=1, le=5)
@@ -24,7 +24,7 @@ class PlanRequest(BaseModel):
 
 class ObservationUpdate(BaseModel):
     target_label: str | None = Field(default=None, max_length=160)
-    status: str | None = Field(default=None, pattern="^(geplant|raw|in_bearbeitung|entwickelt)$")
+    status: str | None = Field(default=None, pattern="^(geplant|raw|in_bearbeitung|vorbereitet|entwickelt)$")
     telescope_id: str | None = None
     planned_date: date | None = None
     rating: int | None = Field(default=None, ge=1, le=5)

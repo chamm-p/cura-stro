@@ -2,7 +2,12 @@
 
 Ergebnisbilder liegen im NAS-Archiv unter ``Developer/<Objekt>/<Gerät>/``.
 Der Watch-Folder scannt diese Ordner und hängt neu aufgetauchte Master
-automatisch an die passende Aufnahme (Status → entwickelt)."""
+automatisch an die passende Aufnahme (Status → entwickelt).
+
+Zusätzlich wird der ``Prepared/<Objekt>/<Gerät>/``-Ordner gescannt, der die
+Ergebnisse des automatischen WBPP-Batches enthält (Status → vorbereitet).
+Der Wechsel von 'vorbereitet' → 'entwickelt' erfolgt erst, wenn der Nutzer
+das manuell entwickelte Bild in den Developer-Ordner legt."""
 
 from __future__ import annotations
 
@@ -54,8 +59,8 @@ async def scan_import(db, user: User, obs: Observation, *, source: str = "watch"
         known.add(nm)
         added += 1
     if added:
-        if obs.status != "entwickelt":
-            obs.status = "entwickelt"
+        # Nur auf 'entwickelt' wechseln — niemals zurückstufen.
+        obs.status = "entwickelt"
         obs.is_new = False
     await db.flush()
     return added
@@ -63,7 +68,9 @@ async def scan_import(db, user: User, obs: Observation, *, source: str = "watch"
 
 async def watch_loop():
     """Hintergrund-Scheduler: scannt regelmäßig die Developer-Ordner aller
-    Aufnahmen mit Daten (Status raw/entwickelt) und hängt neue Master an."""
+    Aufnahmen mit Daten (Status raw/vorbereitet/entwickelt) und hängt neue
+    Master an. Der Wechsel zu 'entwickelt' erfolgt nur, wenn neue Dateien im
+    Developer-Ordner auftauchen (manuelle Entwicklung durch den Nutzer)."""
     if not _cfg.result_watch_enabled:
         logger.info("Result-Watch aus (deaktiviert).")
         return
@@ -71,8 +78,16 @@ async def watch_loop():
     while True:
         try:
             async with async_session() as db:
+                # Scanne alle Observations, die Subs haben (raw, in_bearbeitung,
+                # vorbereitet, entwickelt) — neue Developer-Dateien werden
+                # registriert und der Status ggf. auf 'entwickelt' gesetzt.
                 obss = list(await db.scalars(
-                    select(Observation).where(Observation.status.in_(["raw", "entwickelt"]))))
+                    select(Observation).where(
+                        Observation.status.in_([
+                            "raw", "in_bearbeitung", "vorbereitet", "entwickelt"
+                        ])
+                    )
+                ))
                 total = 0
                 for obs in obss:
                     user = await db.get(User, obs.user_id)

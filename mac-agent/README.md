@@ -4,25 +4,52 @@ Kleiner HTTP-Service, der auf dem Mac läuft und PixInsight headless (ohne GUI)
 startet. Wird vom cura-stro-Backend getriggert, sobald eine Aufnahme verarbeitet
 werden soll.
 
-## Architektur
+## Architektur (File-Broker-Modus)
+
+Der Mac braucht **keinen SMB-Mount** auf das NAS. Alle Dateien werden über
+HTTP transferiert:
 
 ```
-cura-stro Backend  ──HTTP──▶  Mac-Agent (dieser Service)
-                                  │
-                                  ├──▶ PixInsight CLI (headless)
-                                  │      └── cura_batch.js (PJSR-Skript)
-                                  │
-                                  ├──▶ liest RAW/<Objekt>/<Gerät>/  (NAS-Mount)
-                                  └──▶ schreibt Developer/<Objekt>/<Gerät>/  (NAS-Mount)
+cura-stro Backend                    Mac-Agent (dieser Service)
+(liest NAS per SMB)                   (PixInsight lokal)
+       │
+       │  1. RAW-Dateien vom NAS lesen
+       │  2. Als ZIP packen
+       │  3. POST /process (multipart upload)
+       │──────────────────────────────▶│
+       │                               │  4. ZIP entpacken
+       │                               │  5. PixInsight + WBPP starten
+       │                               │  6. Ergebnisse als ZIP packen
+       │  7. GET /results/{job_id}     │
+       │◀──────────────────────────────│
+       │  8. Ergebnis-ZIP entpacken
+       │  9. Auf NAS schreiben (Prepared/)
+       │ 10. Status → 'vorbereitet'
+       │
+       │  Später: Nutzer entwickelt manuell in PixInsight
+       │  → legt Ergebnis in Developer/ → Watch-Loop → 'entwickelt'
 ```
 
-Der Mac muss das gleiche NAS-Volume gemountet haben wie das cura-stro-Backend.
-Der Agent erhält die *relativen* Pfade (z. B. `RAW/IC 417/ASK 2600/`) und setzt
-seinen eigenen Mount-Prefix davor (konfigurierbar via `NAS_MOUNT_PREFIX`).
+### Status-Fluss
 
-## Installation
+```
+geplant → raw → in_bearbeitung → vorbereitet → entwickelt
+                         │              │           │
+                         │              │           └─ Watch-Loop erkennt
+                         │              │              Developer-Dateien
+                         │              └─ WBPP fertig, Master in Prepared/
+                         └─ PixInsight-Batch läuft auf dem Mac
+```
 
-### 1. Python-Abhängigkeiten
+## Setup
+
+### 1. Voraussetzungen
+
+- PixInsight ist auf dem Mac installiert
+- Python 3.10+
+- Der Mac ist im selben Netzwerk wie das cura-stro-Backend
+
+### 2. Installation
 
 ```bash
 cd cura-stro/mac-agent
@@ -31,130 +58,87 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. PixInsight-Pfad prüfen
+### 3. Konfiguration
 
-Standard-Pfad auf dem Mac:
-```
-/Applications/PixInsight/PixInsight.app/Contents/MacOS/PixInsight
-```
+Umgebungsvariablen (in `.env` oder direkt beim Start):
 
-Falls abweichend, via Umgebungsvariable setzen:
-```bash
-export PIXINSIGHT_BIN=/pfad/zu/PixInsight
-```
+| Variable | Default | Beschreibung |
+|---|---|---|
+| `AGENT_PORT` | `7777` | Port, auf dem der Agent lauscht |
+| `AGENT_TOKEN` | (leer) | Shared-Secret mit dem Backend (muss gleich sein) |
+| `PIXINSIGHT_BIN` | `/Applications/PixInsight/PixInsight.app/Contents/MacOS/PixInsight` | Pfad zur PixInsight-Binary |
+| `BATCH_SCRIPT` | `cura_batch.js` (neben agent.py) | Pfad zum Batch-Skript |
+| `WBPP_SCRIPT` | `…/WeightedBatchPreProcessing.js` | Pfad zum WBPP-Skript |
+| `WORK_DIR` | `~/cura-stro-jobs` | Temporäres Arbeitsverzeichnis |
+| `MAX_CONCURRENT` | `1` | Maximal gleichzeitige PixInsight-Prozesse |
 
-### 3. NAS-Mount konfigurieren
-
-Der Mac muss das NAS-Volume mounten, auf dem das cura-stro-Archiv liegt.
-Der Mount-Pfad wird via `NAS_MOUNT_PREFIX` konfiguriert:
-
-```bash
-# Beispiel: NAS ist gemountet unter /Volumes/astro
-export NAS_MOUNT_PREFIX=/Volumes/astro
-```
-
-Der Agent setzt dann z. B. `/Volumes/astro/RAW/IC 417/ASK 2600/` zusammen.
-
-### 4. Shared-Secret setzen
-
-Das gleiche Token wie im cura-stro-Backend (`.env`: `PIXINSIGHT_AGENT_TOKEN`):
+### 4. Start
 
 ```bash
-export AGENT_TOKEN=dein-shared-secret
-```
-
-### 5. Starten (Development)
-
-```bash
+# Development
 python agent.py
-# Läuft auf http://0.0.0.0:7777
+
+# Mit Token
+AGENT_TOKEN="dein-shared-secret" python agent.py
+
+# Production (launchd-Daemon)
+cp com.cura-stro.agent.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.cura-stro.agent.plist
 ```
 
-### 6. Als launchd-Daemon installieren (Auto-Start)
+### 5. Backend-Konfiguration
 
+Im cura-stro Backend `.env`:
+
+```env
+PIXINSIGHT_AGENT_URL=http://<mac-ip>:7777
+PIXINSIGHT_AGENT_TOKEN=<gleicher-token-wie-auf-dem-mac>
+```
+
+## API-Endpunkte
+
+| Methode | Pfad | Beschreibung |
+|---|---|---|
+| `GET` | `/health` | Health-Check (PixInsight gefunden? WBPP gefunden?) |
+| `POST` | `/process` | Job annehmen (ZIP-Upload) & PixInsight starten |
+| `GET` | `/status/{job_id}` | Job-Status abfragen |
+| `GET` | `/results/{job_id}` | Ergebnis-ZIP herunterladen (wenn completed) |
+| `GET` | `/jobs` | Alle Jobs auflisten |
+| `GET` | `/logs/{job_id}` | Log-Inhalt eines Jobs |
+| `DELETE` | `/jobs/{job_id}` | Abgeschlossenen Job löschen (inkl. Temp-Dateien) |
+
+## WBPP (WeightedBatchPreProcessing)
+
+Das Batch-Skript (`cura_batch.js`) versucht zuerst, das WBPP-Skript von
+PixInsight aufzurufen. WBPP übernimmt die komplette Vorverarbeitung:
+
+- Master-Kalibrierung (Bias/Dark/Flat)
+- ImageCalibration
+- StarAlignment (Registrierung)
+- LocalNormalization (optional)
+- ImageIntegration (Stacking mit Signal-Gewichtung)
+- Drizzle (optional)
+
+Falls WBPP nicht gefunden wird oder fehlschlägt, fällt das Skript auf einen
+manuellen Durchlauf (ImageCalibration → StarAlignment → ImageIntegration)
+zurück.
+
+### WBPP-Pfad anpassen
+
+Der Standard-Pfad für WBPP auf dem Mac ist:
+```
+/Applications/PixInsight/src/scripts/BatchProcessing/WeightedBatchPreProcessing.js
+```
+
+Falls dein WBPP woanders liegt, setze `WBPP_SCRIPT`:
 ```bash
-# Pfade in com.cura-stro.agent.plist anpassen!
-sudo cp com.cura-stro.agent.plist /Library/LaunchDaemons/
-sudo launchctl load /Library/LaunchDaemons/com.cura-stro.agent.plist
+WBPP_SCRIPT="/pfad/zu/WeightedBatchPreProcessing.js" python agent.py
 ```
 
-Logs: `/tmp/cura-stro-agent.log`
+## Sicherheit
 
-## API-Endpoints
-
-| Method | Path | Beschreibung |
-|--------|------|-------------|
-| `GET`  | `/health` | Health-Check (PixInsight gefunden? Skript vorhanden?) |
-| `POST` | `/process` | Job annehmen & PixInsight starten |
-| `GET`  | `/status/{job_id}` | Job-Status abfragen |
-| `GET`  | `/jobs` | Alle Jobs auflisten |
-| `GET`  | `/logs/{job_id}` | Log-Inhalt eines Jobs |
-| `DELETE` | `/jobs/{job_id}` | Abgeschlossenen Job löschen |
-
-### POST /process
-
-```json
-{
-  "input_dir": "RAW/IC 417/ASK 2600/",
-  "output_dir": "Developer/IC 417/ASK 2600/",
-  "frame_info": {
-    "object_name": "IC 417",
-    "device_name": "ASK 2600",
-    "total_subs": 120,
-    "filters": [
-      {"filter": "H", "subs": 60, "exposures_s": [300.0]},
-      {"filter": "OIII", "subs": 60, "exposures_s": [300.0]}
-    ],
-    "frame_types": {"light": 120, "dark": 30, "flat": 20, "bias": 50}
-  },
-  "token": "dein-shared-secret"
-}
-```
-
-## cura_batch.js — PixInsight Batch-Skript
-
-Das mitgelieferte PJSR-Skript führt die klassische Vorverarbeitung durch:
-
-1. **Dateien sortieren** nach Frame-Typ (ASIAir-Namenskonvention: `Light_…`, `Dark_…`, `Flat_…`, `Bias_…`)
-2. **Master-Frames erstellen** (Bias/Dark/Flat mitteln via ImageIntegration)
-3. **ImageCalibration** — Lights mit Bias/Dark/Flat kalibrieren
-4. **StarAlignment** — Lights registrieren (auf Referenz-Frame)
-5. **ImageIntegration** — Kalibrierte & ausgerichtete Lights zum Master stacken
-6. **Ergebnis** ins Output-Verzeichnis schreiben (`master_<Objekt>_<Filter>.xisf`)
-
-### WBPP-Alternative
-
-Statt des eigenen Skripts kann auch das beliebte **WeightedBatchPreProcessing
-(WBPP)**-Script verwendet werden. Dazu `BATCH_SCRIPT` auf den WBPP-Pfad setzen:
-
-```bash
-export BATCH_SCRIPT=/Applications/PixInsight/src/scripts/BatchProcessing/WeightedBatchPreProcessing.js
-```
-
-WBPP bietet erweiterte Funktionen (LocalNormalization, Drizzle, automatische
-Gruppierung), ist aber komplexer in der headless-Konfiguration.
-
-## Status-Fluss in cura-stro
-
-```
-geplant → raw → in_bearbeitung → entwickelt
-                       │                ▲
-                       │                │ Watch-Loop erkennt
-                       │                │ neue Datei im
-                       └─ Mac-Agent ────┘ Developer-Ordner
-                          schreibt Ergebnis
-```
-
-- `raw`: Subs importiert, bereit zur Verarbeitung
-- `in_bearbeitung`: PixInsight-Batch läuft auf dem Mac (neu)
-- `entwickelt`: Ergebnis im Developer-Ordner (Watch-Loop setzt automatisch)
-
-## Fehlersuche
-
-| Problem | Lösung |
-|---------|--------|
-| Agent nicht erreichbar | Mac an? Port 7777 frei? `launchctl list \| grep cura-stro` |
-| PixInsight nicht gefunden | `PIXINSIGHT_BIN` prüfen, `GET /health` |
-| Keine Light-Frames | Input-Verzeichnis prüfen, NAS-Mount korrekt? |
-| Job failed | `GET /logs/{job_id}` für PixInsight-Log |
-| Token-Fehler (403) | `AGENT_TOKEN` auf beiden Seiten gleich? |
+- Setze `AGENT_TOKEN` auf beiden Seiten (Backend + Agent) auf denselben Wert
+- Der Agent lauscht auf `0.0.0.0` — stelle sicher, dass nur das Backend ihn
+  erreichen kann (Firewall / VLAN)
+- Temp-Dateien werden in `WORK_DIR` gespeichert und können mit
+  `DELETE /jobs/{job_id}` aufgeräumt werden

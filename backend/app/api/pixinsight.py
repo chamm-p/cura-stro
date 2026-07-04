@@ -2,6 +2,7 @@
 
 Endpoints:
     POST   /api/observations/{obs_id}/process   — PixInsight-Batch starten
+    POST   /api/observations/{obs_id}/poll       — Job-Ergebnisse abholen
     GET    /api/pixinsight/status/{job_id}       — Job-Status abfragen
     GET    /api/pixinsight/health                — Agent-Health-Check
 """
@@ -9,6 +10,7 @@ Endpoints:
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,6 +38,10 @@ async def _owned_obs(db: AsyncSession, user: User, obs_id: str) -> Observation:
     return o
 
 
+class PollRequest(BaseModel):
+    job_id: str
+
+
 @router.post("/api/observations/{obs_id}/process")
 async def trigger_processing(
     obs_id: str,
@@ -44,13 +50,44 @@ async def trigger_processing(
 ):
     """Startet den PixInsight-Batch für diese Aufnahme über den Mac-Agent.
 
-    Setzt den Status auf 'in_bearbeitung'. Der Mac-Agent verarbeitet die
-    RAW-Dateien und schreibt Ergebnisse ins Developer-Verzeichnis, wo der
-    Watch-Loop sie automatisch erkennt (Status → 'entwickelt').
+    Liest die RAW-Dateien vom NAS, zippt sie und lädt sie per HTTP an den
+    Mac-Agent hoch. Der Agent verarbeitet sie mit PixInsight/WBPP.
+
+    Setzt den Status auf 'in_bearbeitung'. Die Ergebnisse müssen später per
+    POST /api/observations/{obs_id}/poll abgeholt werden (Status → 'vorbereitet').
     """
     obs = await _owned_obs(db, user, obs_id)
     try:
         result = await pixinsight.trigger_batch(db, user, obs)
+        await db.commit()
+        return result
+    except ValueError as e:
+        await db.rollback()
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(500, f"Unerwarteter Fehler: {e}")
+
+
+@router.post("/api/observations/{obs_id}/poll")
+async def poll_results(
+    obs_id: str,
+    req: PollRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Holt die Ergebnisse eines PixInsight-Jobs vom Mac-Agent ab.
+
+    Wenn der Job abgeschlossen ist, wird die Ergebnis-ZIP heruntergeladen,
+    entpackt und ins Prepared-Verzeichnis auf dem NAS geschrieben.
+    Der Status wechselt auf 'vorbereitet'.
+
+    Wenn der Job noch läuft, wird der aktuelle Status zurückgegeben
+    (keine Änderung am Observation-Status).
+    """
+    obs = await _owned_obs(db, user, obs_id)
+    try:
+        result = await pixinsight.poll_job_results(db, user, obs, req.job_id)
         await db.commit()
         return result
     except ValueError as e:

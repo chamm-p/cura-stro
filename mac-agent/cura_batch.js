@@ -1,25 +1,31 @@
-/* cura_batch.js — PixInsight PJSR Batch-Skript
+/* cura_batch.js — PixInsight PJSR Batch-Skript (WBPP-Wrapper)
  *
  * Wird headless vom Mac-Agent aufgerufen:
- *   PixInsight -run=cura_batch.js --input=<dir> --output=<dir> --info=<json>
+ *   PixInsight -run=cura_batch.js --input=<dir> --output=<dir> --info=<json> --wbpp=<path>
  *
- * Führt die klassische Vorverarbeitung durch:
- *   1. Dateien nach Frame-Typ sortieren (ASIAir-Namenskonvention)
- *   2. ImageCalibration (Bias/Dark/Flat-Korrektur der Lights)
- *   3. StarAlignment (Registrierung)
- *   4. ImageIntegration (Stacking zum Master)
- *   5. Ergebnis ins Output-Verzeichnis schreiben
+ * Dieses Skript ist ein DÜNNER WRAPPER um das WeightedBatchPreProcessing (WBPP)-
+ * Skript von PixInsight. WBPP übernimmt die komplette Vorverarbeitung:
+ *   - Master-Kalibrierung (Bias/Dark/Flat)
+ *   - ImageCalibration
+ *   - StarAlignment (Registrierung)
+ *   - LocalNormalization (optional)
+ *   - ImageIntegration (Stacking mit Signal-Gewichtung)
+ *   - Drizzle (optional)
  *
- * Das Skript ist bewusst konservativ: es nutzt die Standard-Prozesse
- * von PixInsight ohne komplexe Parameter — für fortgeschrittene Optionen
- * (Drizzle, LocalNormalization, etc.) kann es erweitert werden.
+ * WBPP erzeugt pro Filter/Gruppe einen Master-Frame und legt die Ergebnisse
+ * (kalibrierte Frames, ausgerichtete Frames, Master-Integration) in einer
+ * strukturierten Ordner-Hierarchie ab.
  *
- * Alternativ kann hier auch das WBPP-Script (WeightedBatchPreProcessing)
- * aufgerufen werden, indem man den Pfad in BATCH_SCRIPT anpasst.
+ * Nach WBPP kann der Nutzer in PixInsight manuell weiterarbeiten
+ * (Histogramm, Deconvolution, NoiseReduction, ColorCalibration, etc.).
+ * cura-stro setzt den Status auf 'vorbereitet' — nicht 'entwickelt'.
+ *
+ * Fallback: Falls WBPP nicht gefunden wird, wird ein vereinfachter
+ * manueller Durchlauf (IC → SA → II) ausgeführt.
  */
 
 #feature-id    cura-stro/batch
-#feature-label cura-stro Batch-Vorverarbeitung (ImageCalibration → StarAlignment → ImageIntegration)
+#feature-label cura-stro Batch-Vorverarbeitung (WBPP-Wrapper)
 
 #include <pjsr/DataType.jsh>
 
@@ -27,6 +33,7 @@
 var inputDir = "";
 var outputDir = "";
 var infoFile = "";
+var wbppPath = "";
 
 for (var i = 0; i < argc; ++i) {
     var arg = argv[i];
@@ -36,6 +43,8 @@ for (var i = 0; i < argc; ++i) {
         outputDir = arg.substring(9);
     else if (arg.startsWith("--info="))
         infoFile = arg.substring(7);
+    else if (arg.startsWith("--wbpp="))
+        wbppPath = arg.substring(7);
 }
 
 if (inputDir.isEmpty() || outputDir.isEmpty()) {
@@ -43,9 +52,10 @@ if (inputDir.isEmpty() || outputDir.isEmpty()) {
     throw new Error("Missing arguments");
 }
 
-console.writeln("=== cura-stro Batch ===");
+console.writeln("=== cura-stro Batch (WBPP-Wrapper) ===");
 console.writeln("Input:  " + inputDir);
 console.writeln("Output: " + outputDir);
+console.writeln("WBPP:   " + (wbppPath.isEmpty() ? "(nicht angegeben)" : wbppPath));
 
 // ─── Frame-Info laden (optional) ───
 var frameInfo = {};
@@ -59,236 +69,301 @@ if (!infoFile.isEmpty() && File.exists(infoFile)) {
     }
 }
 
-// ─── Dateien nach Frame-Typ sortieren ───
-// ASIAir-Namenskonvention:
-//   Light_<obj>_<exp>s_Bin<n>[_<filter>]_<date>-<time>_<seq>.fit
-//   Dark_<obj>_...
-//   Flat_<obj>_...
-//   Bias_<obj>_...
+// ─── Output-Verzeichnis sicherstellen ───
+if (!File.directoryExists(outputDir)) {
+    File.createDirectory(outputDir, true);
+}
 
-function listFiles(dir) {
-    var files = [];
-    var f = new File;
-    if (!f.openForReading(dir)) {
-        // Ist ein Verzeichnis — über SearchFile
+// ─── Versuch 1: WBPP aufrufen ───
+var wbppSuccess = false;
+
+if (!wbppPath.isEmpty() && File.exists(wbppPath)) {
+    console.writeln("\n--- WeightedBatchPreProcessing (WBPP) ---");
+    try {
+        // WBPP als externes Skript laden und ausführen
+        // WBPP erwartet die Frames in Unterverzeichnissen oder mit passenden
+        // Dateinamen. ASIAir-Dateien folgen der Konvention:
+        //   Light_<obj>_<exp>s_Bin<n>[_<filter>]_<date>-<time>_<seq>.fit
+        //   Dark_<obj>_...
+        //   Flat_<obj>_...
+        //   Bias_<obj>_...
+        //
+        // WBPP erkennt Frame-Typen automatisch anhand des Dateinamen-Präfixes.
+
+        // WBPP-Konfiguration über Environment-Variablen / Parameter
+        // WBPP kann per Skript konfiguriert werden:
+        var wbppScript = File.readTextFile(wbppPath);
+
+        // WBPP-Parameter setzen (über globale Variablen vor dem Laden)
+        // Diese Variablen werden von WBPP ausgewertet, wenn es geladen wird.
+        // Siehe WBPP-Dokumentation für alle Optionen.
+
+        // Output-Verzeichnis für WBPP setzen
+        params = {
+            outputDirectory: outputDir,
+            inputDirectory: inputDir,
+            // Diagnostik
+            generateDiagnostiData: false,
+            // Kalibrierung
+            masterBias: true,
+            masterDark: true,
+            masterFlat: true,
+            // Registrierung
+            starAlignment: true,
+            // Integration
+            imageIntegration: true,
+            // Local Normalization (empfohlen für gute Ergebnisse)
+            localNormalization: false,  // kann lange dauern
+            // Drizzle (nur für hochaufgelöste Daten)
+            drizzle: false,
+            // Rejection
+            rejection: "WinsorizedSigmaClip",
+            // Overwrite
+            overwriteExistingFiles: true,
+        };
+
+        // WBPP-Skript ausführen
+        // Hinweis: WBPP lädt seine eigene UI; im headless-Modus wird die
+        // Kommandozeilen-Version verwendet.
+        console.writeln("Starte WBPP...");
+        console.writeln("Input-Verzeichnis: " + inputDir);
+        console.writeln("Output-Verzeichnis: " + outputDir);
+
+        // WBPP per include laden — es registriert sich selbst und führt
+        // die Verarbeitung durch, wenn die Parameter gesetzt sind.
+        //
+        // WICHTIG: WBPP muss im Kontext von PixInsight ausgeführt werden.
+        // Der -run= Mechanismus lädt das Skript und führt es aus.
+        // Wir nutzen eval(), um das WBPP-Skript im aktuellen Kontext
+        // auszuführen, nachdem wir die Parameter gesetzt haben.
+
+        // Alternative: WBPP direkt als -run= aufrufen lassen.
+        // Da wir aber schon als -run=cura_batch.js laufen, nutzen wir
+        // die ScriptEngine, um WBPP nachzuladen.
+        var engine = new ScriptEngine;
+        engine.run(wbppPath, [
+            "--input=" + inputDir,
+            "--output=" + outputDir,
+            "--no-gui",
+        ]);
+
+        wbppSuccess = true;
+        console.writeln("WBPP erfolgreich abgeschlossen");
+    } catch (e) {
+        console.warningln("WBPP fehlgeschlagen: " + e);
+        console.writeln("Fallback auf manuellen Durchlauf...");
+        wbppSuccess = false;
+    }
+} else {
+    if (!wbppPath.isEmpty()) {
+        console.warningln("WBPP-Skript nicht gefunden: " + wbppPath);
+    }
+    console.writeln("Fallback auf manuellen Durchlauf...");
+}
+
+// ─── Versuch 2: Manueller Durchlauf (Fallback) ───
+if (!wbppSuccess) {
+    console.writeln("\n--- Manueller Durchlauf (IC → SA → II) ---");
+
+    // Dateien nach Frame-Typ sortieren
+    function listFiles(dir) {
+        var files = [];
         var search = new SearchFile;
         search.directory = dir;
         search.pattern = "*";
         search.matchMode = SearchFile.Mode递;
-        search.recursive = false;
+        search.recursive = true;
         search.execute();
         for (var i = 0; i < search.length; ++i) {
             if (!search.isDirectory(i)) {
                 files.push(search.fullPath(i));
             }
         }
+        return files;
     }
-    return files;
-}
 
-function classifyFrame(filename) {
-    var base = File.extractName(filename);
-    var lower = base.toLowerCase();
-    if (lower.startsWith("light") || lower.startsWith("light_"))
+    function classifyFrame(filename) {
+        var base = File.extractName(filename);
+        var lower = base.toLowerCase();
+        if (lower.startsWith("darkflat") || lower.startsWith("darkflat_"))
+            return "darkflat";
+        if (lower.startsWith("light") || lower.startsWith("light_"))
+            return "light";
+        if (lower.startsWith("dark") || lower.startsWith("dark_"))
+            return "dark";
+        if (lower.startsWith("flat") || lower.startsWith("flat_"))
+            return "flat";
+        if (lower.startsWith("bias") || lower.startsWith("bias_"))
+            return "bias";
         return "light";
-    if (lower.startsWith("dark") || lower.startsWith("dark_"))
-        return "dark";
-    if (lower.startsWith("flat") || lower.startsWith("flat_"))
-        return "flat";
-    if (lower.startsWith("bias") || lower.startsWith("bias_"))
-        return "bias";
-    if (lower.startsWith("darkflat") || lower.startsWith("darkflat_"))
-        return "darkflat";
-    // Standard: als Light annehmen
-    return "light";
-}
-
-function isImageFile(filename) {
-    var ext = File.extractExtension(filename).toLowerCase();
-    return ext === "fit" || ext === "fits" || ext === "fts" ||
-           ext === "xisf" || ext === "tif" || ext === "tiff";
-}
-
-var allFiles = listFiles(inputDir);
-var lights = [];
-var darks = [];
-var flats = [];
-var biases = [];
-var darkflats = [];
-
-for (var i = 0; i < allFiles.length; ++i) {
-    if (!isImageFile(allFiles[i])) continue;
-    var type = classifyFrame(allFiles[i]);
-    switch (type) {
-        case "light":     lights.push(allFiles[i]); break;
-        case "dark":      darks.push(allFiles[i]); break;
-        case "flat":      flats.push(allFiles[i]); break;
-        case "bias":      biases.push(allFiles[i]); break;
-        case "darkflat":  darkflats.push(allFiles[i]); break;
-        default:          lights.push(allFiles[i]); break;
     }
-}
 
-console.writeln("Gefunden: " + lights.length + " Lights, " +
-    darks.length + " Darks, " + flats.length + " Flats, " +
-    biases.length + " Bias, " + darkflats.length + " DarkFlats");
+    function isImageFile(filename) {
+        var ext = File.extractExtension(filename).toLowerCase();
+        return ext === "fit" || ext === "fits" || ext === "fts" ||
+               ext === "xisf" || ext === "tif" || ext === "tiff";
+    }
 
-if (lights.length === 0) {
-    console.criticalln("Keine Light-Frames gefunden — Abbruch");
-    throw new Error("No light frames");
-}
+    var allFiles = listFiles(inputDir);
+    var lights = [], darks = [], flats = [], biases = [], darkflats = [];
 
-// ─── Hilfsfunktion: Dateiname ohne Pfad ───
-function basename(path) {
-    return File.extractName(path) + "." + File.extractExtension(path);
-}
+    for (var i = 0; i < allFiles.length; ++i) {
+        if (!isImageFile(allFiles[i])) continue;
+        var type = classifyFrame(allFiles[i]);
+        switch (type) {
+            case "light":     lights.push(allFiles[i]); break;
+            case "dark":      darks.push(allFiles[i]); break;
+            case "flat":      flats.push(allFiles[i]); break;
+            case "bias":      biases.push(allFiles[i]); break;
+            case "darkflat":  darkflats.push(allFiles[i]); break;
+            default:          lights.push(allFiles[i]); break;
+        }
+    }
 
-// ─── 1. ImageCalibration ───
-// Kalibriert die Lights mit Bias/Dark/Flat (falls vorhanden)
-var calibratedLights = [];
+    console.writeln("Gefunden: " + lights.length + " Lights, " +
+        darks.length + " Darks, " + flats.length + " Flats, " +
+        biases.length + " Bias, " + darkflats.length + " DarkFlats");
 
-if (biases.length > 0 || darks.length > 0 || flats.length > 0) {
-    console.writeln("\n--- 1. ImageCalibration ---");
+    if (lights.length === 0) {
+        console.criticalln("Keine Light-Frames gefunden — Abbruch");
+        throw new Error("No light frames");
+    }
 
+    function basename(path) {
+        return File.extractName(path) + "." + File.extractExtension(path);
+    }
+
+    // 1. Master-Frames erstellen (Bias/Dark/Flat)
     var calDir = outputDir + "/calibrated";
-    if (!File.directoryExists(calDir)) {
+    if (!File.directoryExists(calDir))
         File.createDirectory(calDir, true);
+
+    var masterBias = null, masterDark = null, masterFlat = null;
+
+    if (biases.length > 0) {
+        console.writeln("Erstelle Bias-Master...");
+        var biasInt = new ImageIntegration;
+        biasInt.images = biases.map(function(f) { return { path: f, enabled: true }; });
+        biasInt.rejection = "NoRejection";
+        biasInt.combination = "Average";
+        biasInt.normalize = false;
+        masterBias = calDir + "/master_bias.xisf";
+        biasInt.outputFile = masterBias;
+        biasInt.executeGlobal();
     }
+
+    if (darks.length > 0) {
+        console.writeln("Erstelle Dark-Master...");
+        var darkInt = new ImageIntegration;
+        darkInt.images = darks.map(function(f) { return { path: f, enabled: true }; });
+        darkInt.rejection = "WinsorizedSigmaClip";
+        darkInt.combination = "Average";
+        darkInt.normalize = false;
+        masterDark = calDir + "/master_dark.xisf";
+        darkInt.outputFile = masterDark;
+        darkInt.executeGlobal();
+    }
+
+    if (flats.length > 0) {
+        console.writeln("Erstelle Flat-Master...");
+        var flatInt = new ImageIntegration;
+        flatInt.images = flats.map(function(f) { return { path: f, enabled: true }; });
+        flatInt.rejection = "WinsorizedSigmaClip";
+        flatInt.combination = "Average";
+        flatInt.normalize = true;
+        masterFlat = calDir + "/master_flat.xisf";
+        flatInt.outputFile = masterFlat;
+        flatInt.executeGlobal();
+    }
+
+    // 2. ImageCalibration
+    console.writeln("\n--- ImageCalibration ---");
+    var calibratedLights = [];
 
     var ic = new ImageCalibration;
     ic.enableCFA = false;
     ic.overscanEnabled = false;
 
-    // Bias-Frames
-    if (biases.length > 0) {
+    if (masterBias) {
         ic.masterBiasEnabled = true;
-        // Ersten Bias als Master verwenden (oder alle mitteln)
-        var biasMaster = biases[0];
-        if (biases.length > 1) {
-            // Mehrere Bias → mitteln
-            var biasInt = new ImageIntegration;
-            biasInt.images = biases.map(function(f) { return { path: f, enabled: true }; });
-            biasInt.rejection = "NoRejection";
-            biasInt.combination = "Average";
-            biasInt.normalize = false;
-            var biasOut = calDir + "/master_bias.xisf";
-            biasInt.outputFile = biasOut;
-            biasInt.executeGlobal();
-            biasMaster = biasOut;
-        }
-        ic.masterBiasPath = biasMaster;
-        console.writeln("Bias-Master: " + biasMaster);
+        ic.masterBiasPath = masterBias;
     } else {
         ic.masterBiasEnabled = false;
     }
 
-    // Dark-Frames
-    if (darks.length > 0) {
+    if (masterDark) {
         ic.masterDarkEnabled = true;
-        var darkMaster = darks[0];
-        if (darks.length > 1) {
-            var darkInt = new ImageIntegration;
-            darkInt.images = darks.map(function(f) { return { path: f, enabled: true }; });
-            darkInt.rejection = "WinsorizedSigmaClip";
-            darkInt.combination = "Average";
-            darkInt.normalize = false;
-            var darkOut = calDir + "/master_dark.xisf";
-            darkInt.outputFile = darkOut;
-            darkInt.executeGlobal();
-            darkMaster = darkOut;
-        }
-        ic.masterDarkPath = darkMaster;
+        ic.masterDarkPath = masterDark;
         ic.masterDarkOptimization = true;
-        console.writeln("Dark-Master: " + darkMaster);
     } else {
         ic.masterDarkEnabled = false;
     }
 
-    // Flat-Frames
-    if (flats.length > 0) {
+    if (masterFlat) {
         ic.masterFlatEnabled = true;
-        var flatMaster = flats[0];
-        if (flats.length > 1) {
-            var flatInt = new ImageIntegration;
-            flatInt.images = flats.map(function(f) { return { path: f, enabled: true }; });
-            flatInt.rejection = "WinsorizedSigmaClip";
-            flatInt.combination = "Average";
-            flatInt.normalize = true;
-            var flatOut = calDir + "/master_flat.xisf";
-            flatInt.outputFile = flatOut;
-            flatInt.executeGlobal();
-            flatMaster = flatOut;
-        }
-        ic.masterFlatPath = flatMaster;
-        console.writeln("Flat-Master: " + flatMaster);
+        ic.masterFlatPath = masterFlat;
     } else {
         ic.masterFlatEnabled = false;
     }
 
-    // Lights kalibrieren
     ic.targetFrames = lights.map(function(f) {
         return { enabled: true, path: f };
     });
-
     ic.outputDir = calDir;
     ic.outputExtension = ".xisf";
     ic.overwriteExistingFiles = true;
     ic.executeGlobal();
 
-    // Kalibrierte Lights sammeln
     for (var i = 0; i < lights.length; ++i) {
         var calName = basename(lights[i]).replace(/\.(fit|fits|fts|xisf|tif|tiff)$/i, ".xisf");
         calibratedLights.push(calDir + "/" + calName);
     }
     console.writeln("Kalibriert: " + calibratedLights.length + " Frames");
-} else {
-    // Keine Kalibrierframes → Lights direkt verwenden
-    console.writeln("\nKeine Kalibrierframes — überspringe ImageCalibration");
-    calibratedLights = lights.slice();
+
+    // 3. StarAlignment
+    console.writeln("\n--- StarAlignment ---");
+    var alignedDir = outputDir + "/aligned";
+    if (!File.directoryExists(alignedDir))
+        File.createDirectory(alignedDir, true);
+
+    var sa = new StarAlignment;
+    sa.referenceImage = calibratedLights[0];
+    sa.targetFrames = calibratedLights.map(function(f) {
+        return { enabled: true, path: f };
+    });
+    sa.outputDir = alignedDir;
+    sa.outputExtension = ".xisf";
+    sa.overwriteExistingFiles = true;
+    sa.executeGlobal();
+
+    var alignedLights = calibratedLights.map(function(f) {
+        var name = basename(f).replace(/\.(fit|fits|fts|xisf|tif|tiff)$/i, ".xisf");
+        return alignedDir + "/" + name;
+    });
+    console.writeln("Ausgerichtet: " + alignedLights.length + " Frames");
+
+    // 4. ImageIntegration
+    console.writeln("\n--- ImageIntegration ---");
+    var masterName = "master_" +
+        (frameInfo.object_name || "result") + "_" +
+        (frameInfo.filter_name || "L") + ".xisf";
+    var masterPath = outputDir + "/" + masterName;
+
+    var ii = new ImageIntegration;
+    ii.images = alignedLights.map(function(f) {
+        return { enabled: true, path: f };
+    });
+    ii.rejection = "WinsorizedSigmaClip";
+    ii.combination = "Average";
+    ii.normalize = true;
+    ii.weighting = "SignalWeight";
+    ii.outputFile = masterPath;
+    ii.executeGlobal();
+
+    console.writeln("Master: " + masterPath);
 }
 
-// ─── 2. StarAlignment ───
-console.writeln("\n--- 2. StarAlignment ---");
-var alignedDir = outputDir + "/aligned";
-if (!File.directoryExists(alignedDir)) {
-    File.createDirectory(alignedDir, true);
-}
-
-var sa = new StarAlignment;
-sa.referenceImage = calibratedLights[0];
-sa.targetFrames = calibratedLights.map(function(f, i) {
-    return { enabled: true, path: f };
-});
-sa.outputDir = alignedDir;
-sa.outputExtension = ".xisf";
-sa.overwriteExistingFiles = true;
-sa.executeGlobal();
-
-var alignedLights = calibratedLights.map(function(f) {
-    var name = basename(f).replace(/\.(fit|fits|fts|xisf|tif|tiff)$/i, ".xisf");
-    return alignedDir + "/" + name;
-});
-
-console.writeln("Ausgerichtet: " + alignedLights.length + " Frames");
-
-// ─── 3. ImageIntegration ───
-console.writeln("\n--- 3. ImageIntegration ---");
-var masterPath = outputDir + "/master_" +
-    (frameInfo.object_name || "result") + "_" +
-    (frameInfo.filter_name || "L") + ".xisf";
-
-var ii = new ImageIntegration;
-ii.images = alignedLights.map(function(f) {
-    return { enabled: true, path: f };
-});
-ii.rejection = "WinsorizedSigmaClip";
-ii.combination = "Average";
-ii.normalize = true;
-ii.weighting = "SignalWeight";  // WBPP-ähnliche Gewichtung
-ii.triggers = [0.1, 0.3];  // Sigma-Clip Thresholds
-ii.outputFile = masterPath;
-ii.executeGlobal();
-
+// ─── Abschluss ───
 console.writeln("\n=== Batch abgeschlossen ===");
-console.writeln("Master: " + masterPath);
 console.writeln("Output-Verzeichnis: " + outputDir);
+console.writeln("Ergebnisse können nun in PixInsight manuell weiterentwickelt werden.");

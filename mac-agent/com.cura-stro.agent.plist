@@ -8,12 +8,12 @@
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/python3</string>
-        <string>/usr/local/bin/agent.py</string>
+        <string>/usr/local/bin/cura-stro-agent/agent.py</string>
     </array>
 
     <!-- Passe diese Pfade an dein Setup an -->
     <key>WorkingDirectory</key>
-    <string>/usr/local/bin</string>
+    <string>/usr/local/bin/cura-stro-agent</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -24,7 +24,11 @@
         <key>PIXINSIGHT_BIN</key>
         <string>/Applications/PixInsight/PixInsight.app/Contents/MacOS/PixInsight</string>
         <key>BATCH_SCRIPT</key>
-        <string>/usr/local/bin/cura_batch.js</string>
+        <string>/usr/local/bin/cura-stro-agent/cura_batch.js</string>
+        <key>WBPP_SCRIPT</key>
+        <string>/Applications/PixInsight/src/scripts/BatchProcessing/WeightedBatchPreProcessing.js</string>
+        <key>WORK_DIR</key>
+        <string>/tmp/cura-stro-jobs</string>
     </dict>
 
     <key>RunAtLoad</key>
