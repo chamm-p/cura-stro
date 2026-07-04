@@ -11,8 +11,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
 # Status-Werte als String (keine PG-Enums → kein Casing-Gotcha):
-#   geplant · raw · entwickelt
-STATUSES = ("geplant", "raw", "entwickelt")
+#   geplant · raw · in_bearbeitung · entwickelt
+STATUSES = ("geplant", "raw", "in_bearbeitung", "entwickelt")
 
 
 class Observation(Base):
@@ -29,7 +29,7 @@ class Observation(Base):
     target_label: Mapped[str | None] = mapped_column(String(160), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="geplant", nullable=False)
     telescope_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("telescopes.id", ondelete="SET NULL"), nullable=True
+        UUID(as_uuid=True), ForeignKey("telescopes.id", ondelete="SET NULL"), nullable=True, index=True
     )
     planned_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     # Bewertung 1–5 (5 = super) — v.a. fürs entwickelte Foto relevant.

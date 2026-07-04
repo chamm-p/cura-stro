@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.cura-stro.agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/usr/local/bin/agent.py</string>
+    </array>
+
+    <!-- Passe diese Pfade an dein Setup an -->
+    <key>WorkingDirectory</key>
+    <string>/usr/local/bin</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>AGENT_PORT</key>
+        <string>7777</string>
+        <key>AGENT_TOKEN</key>
+        <string>dein-shared-secret</string>
+        <key>PIXINSIGHT_BIN</key>
+        <string>/Applications/PixInsight/PixInsight.app/Contents/MacOS/PixInsight</string>
+        <key>BATCH_SCRIPT</key>
+        <string>/usr/local/bin/cura_batch.js</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/cura-stro-agent.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/cura-stro-agent.err</string>
+</dict>
+</plist>

@@ -88,6 +88,13 @@ class Settings(BaseSettings):
     result_watch_enabled: bool = Field(default=True)
     result_watch_interval_min: int = Field(default=10, ge=1)
 
+    # ─── PixInsight Mac-Agent (Batch-Verarbeitung) ───
+    # URL des Mac-Agents (mac-agent/agent.py), der PixInsight headless startet.
+    # Leer = PixInsight-Integration deaktiviert.
+    pixinsight_agent_url: str = Field(default="")
+    # Shared-Secret zwischen Backend und Mac-Agent.
+    pixinsight_agent_token: str = Field(default="")
+
     # ─── MCP-Server (Phase 8) — Token für externen Zugriff (curai etc.) ───
     # Leer = MCP-Endpunkt deaktiviert.
     mcp_token: str = Field(default="")
