@@ -391,14 +391,17 @@ async def _run_pixinsight(job: Job) -> None:
         config_path.write_text(json.dumps(config, indent=2))
         log.info("  Config: %s", config_path)
 
-        # Wrapper-JS generieren: setzt CURA_CONFIG_PATH und inkludiert cura_batch.js
+        # Wrapper-JS generieren: setzt CURA_CONFIG_PATH und inkludiert cura_batch.js.
+        # Statt #include (nur für .jsh-Header gedacht) lesen wir cura_batch.js
+        # und inlinen den Inhalt direkt in den Wrapper.
         wrapper_path = Path(job.work_input).parent / f"{job.id}_wrapper.js"
+        batch_source = Path(batch_script).read_text()
         wrapper_js = (
             "var CURA_CONFIG_PATH = " + json.dumps(str(config_path)) + ";\n"
-            "#include " + json.dumps(batch_script) + "\n"
+            + batch_source
         )
         wrapper_path.write_text(wrapper_js)
-        log.info("  Wrapper: %s", wrapper_path)
+        log.info("  Wrapper: %s (cura_batch.js inlined)", wrapper_path)
 
         # PixInsight CLI Aufruf: nur -r=<wrapper> --force-exit
         # (keine weiteren Argumente — PixInsight lehnt unbekannte Flags ab)
