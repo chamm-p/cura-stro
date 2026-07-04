@@ -57,7 +57,6 @@ ensure_venv() {
 # ─── Abhängigkeiten prüfen / installieren ───
 ensure_deps() {
     header "Abhängigkeiten prüfen"
-    # Prüfen ob fastapi installiert ist (als Indikator)
     if "$VENV_PY" -c "import fastapi" 2>/dev/null; then
         info "Abhängigkeiten bereits installiert"
     else
@@ -70,19 +69,16 @@ ensure_deps() {
 
 # ─── Token laden ───
 load_token() {
-    # 1. .env-Datei
     if [ -f "$ENV_FILE" ]; then
         info ".env gefunden — lade Umgebungsvariablen"
         set -a
         source "$ENV_FILE"
         set +a
     fi
-    # 2. Token-Datei
     if [ -z "${AGENT_TOKEN:-}" ] && [ -f "$TOKEN_FILE" ]; then
         export AGENT_TOKEN="$(cat "$TOKEN_FILE" | tr -d '[:space:]')"
         info "Token aus .agent_token geladen"
     fi
-    # 3. Token-Status
     if [ -n "${AGENT_TOKEN:-}" ]; then
         info "Token: aktiv"
     else
@@ -94,6 +90,11 @@ load_token() {
 
 # ─── Prüfen ob Agent bereits läuft ───
 is_running() {
+    # Alle Python-Prozesse suchen, die agent.py ausführen
+    if pgrep -f "$AGENT" >/dev/null 2>&1; then
+        return 0
+    fi
+    # Fallback: PID-Datei prüfen
     if [ -f "$PID_FILE" ]; then
         local pid
         pid="$(cat "$PID_FILE" 2>/dev/null || echo '')"
@@ -101,23 +102,26 @@ is_running() {
             return 0
         fi
     fi
-    # Fallback: pgrep
-    if pgrep -f "agent.py" >/dev/null 2>&1; then
-        return 0
-    fi
     return 1
 }
 
 get_pid() {
+    # Primär: pgrep nach agent.py-Pfad
+    local pid
+    pid=$(pgrep -f "$AGENT" 2>/dev/null | head -1)
+    if [ -n "$pid" ]; then
+        echo "$pid"
+        return
+    fi
+    # Fallback: PID-Datei
     if [ -f "$PID_FILE" ]; then
-        local pid
         pid="$(cat "$PID_FILE" 2>/dev/null || echo '')"
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             echo "$pid"
             return
         fi
     fi
-    pgrep -f "agent.py" 2>/dev/null | head -1
+    echo ""
 }
 
 # ─── Health-Check ───
@@ -135,17 +139,45 @@ do_health() {
 # ─── Agent stoppen ───
 do_stop() {
     header "Agent stoppen"
-    if is_running; then
-        local pid
-        pid=$(get_pid)
-        kill "$pid" 2>/dev/null || true
-        sleep 1
-        if kill -0 "$pid" 2>/dev/null; then
+    local stopped_any=false
+
+    # Alle Prozesse finden, die agent.py ausführen
+    local pids
+    pids=$(pgrep -f "$AGENT" 2>/dev/null || echo '')
+    if [ -n "$pids" ]; then
+        echo "$pids" | while read -r pid; do
+            kill "$pid" 2>/dev/null || true
+            echo "  SIGTERM → PID $pid"
+        done
+        sleep 2
+        # Prüfen ob noch welche laufen → SIGKILL
+        pids=$(pgrep -f "$AGENT" 2>/dev/null || echo '')
+        if [ -n "$pids" ]; then
             warn "SIGTERM ignoriert — sende SIGKILL"
-            kill -9 "$pid" 2>/dev/null || true
+            echo "$pids" | while read -r pid; do
+                kill -9 "$pid" 2>/dev/null || true
+                echo "  SIGKILL → PID $pid"
+            done
+        fi
+        stopped_any=true
+    fi
+
+    # Auch PID-Datei-basierten Prozess killen (falls pgrep ihn nicht fand)
+    if [ -f "$PID_FILE" ]; then
+        local fpid
+        fpid="$(cat "$PID_FILE" 2>/dev/null || echo '')"
+        if [ -n "$fpid" ] && kill -0 "$fpid" 2>/dev/null; then
+            kill "$fpid" 2>/dev/null || true
+            sleep 1
+            kill -9 "$fpid" 2>/dev/null || true
+            echo "  PID $fpid (aus PID-Datei) beendet"
+            stopped_any=true
         fi
         rm -f "$PID_FILE"
-        info "Agent gestoppt (PID $pid)"
+    fi
+
+    if [ "$stopped_any" = true ]; then
+        info "Agent gestoppt"
     else
         warn "Agent läuft nicht"
     fi
@@ -173,17 +205,14 @@ do_install() {
         exit 1
     fi
 
-    # plist kopieren und Pfade anpassen
     mkdir -p "$HOME/Library/LaunchAgents"
     sed "s|__SCRIPT_DIR__|$SCRIPT_DIR|g" "$plist_src" > "$plist_dst"
-    # Token in plist eintragen (falls vorhanden)
     if [ -n "${AGENT_TOKEN:-}" ]; then
         sed -i '' "s|__AGENT_TOKEN__|$AGENT_TOKEN|g" "$plist_dst"
     else
         sed -i '' 's|<string>__AGENT_TOKEN__</string>||g' "$plist_dst"
     fi
 
-    # Alte Version entladen (falls vorhanden)
     launchctl unload "$plist_dst" 2>/dev/null || true
     launchctl load "$plist_dst"
     info "Daemon installiert und geladen: $plist_dst"
@@ -211,7 +240,6 @@ do_start() {
     ensure_deps
     load_token
 
-    # Shell-Sim-Modus?
     local sim_note=""
     if [ "${1:-}" = "--sim" ]; then
         sim_note="  Modus:        Shell-Sim (PixInsight nicht nötig)"
@@ -226,8 +254,11 @@ do_start() {
     [ -n "$sim_note" ] && echo -e "$sim_note"
     echo ""
 
-    # Starten — stdout/stderr in Log-Datei UND auf Konsole
-    "$VENV_PY" "$AGENT" 2>&1 | tee "$LOG_FILE" &
+    # Starten mit Process-Substitution (keine Pipeline!).
+    # Dadurch ist $! die PID des Python-Prozesses, nicht von tee.
+    # tee läuft in einer Subshell und beendet sich selbst, wenn Python
+    # die Pipe schließt (beim Exit).
+    "$VENV_PY" "$AGENT" > >(tee "$LOG_FILE") 2>&1 &
     local pid=$!
     echo "$pid" > "$PID_FILE"
     info "Agent gestartet (PID $pid)"
@@ -258,7 +289,7 @@ cura-stro Mac-Agent — Start-Script
 Usage:
   ./start.sh              Agent starten (venv + deps + token automatisch)
   ./start.sh --sim        Wie oben, aber Shell-Sim-Modus-Hinweis
-  ./start.sh --stop       Agent stoppen
+  ./start.sh --stop       Agent stoppen (alle Instanzen)
   ./start.sh --restart    Agent neu starten
   ./start.sh --check      Health-Check (Agent muss laufen)
   ./start.sh --logs       Log-Datei tailen (Strg+C zum Beenden)

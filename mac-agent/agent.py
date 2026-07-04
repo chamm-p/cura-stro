@@ -1,39 +1,24 @@
 """cura-stro Mac-Agent — PixInsight-Batch-Trigger (File-Broker-Modus).
 
 Läuft als kleiner HTTP-Service auf dem Mac, auf dem PixInsight installiert ist.
-Nimmt Verarbeitungs-Jobs vom cura-stro-Backend entgegen — **inklusive der RAW-
+Nimmt Verarbeitungs-Jobs vom cura-stro Backend entgegen — **inklusive der RAW-
 Dateien als ZIP-Upload**. PixInsight wird headless (CLI) gestartet, die
 Ergebnisse werden als ZIP zurückgeladen.
 
-Im Gegensatz zur ersten Version benötigt dieser Agent **keinen SMB-Mount**.
-Alle Dateien werden über HTTP transferiert:
+Alle Dateien werden über HTTP transferiert (kein SMB-Mount nötig):
 
     Backend liest NAS  →  zip  →  POST /process (multipart)  →  Agent
-    Agent entpackt     →  PixInsight/WBPP  →  zip  →  GET /results/{job_id}
+    Agent entpackt     →  PixInsight  →  zip  →  GET /results/{job_id}
     Backend entpackt   →  schreibt auf NAS (Prepared/)  →  Status: vorbereitet
 
-Setup:
-    pip install -r requirements.txt
-    python agent.py                      # Development
-    # Als launchd-Daemon: siehe com.cura-stro.agent.plist
-
-Processing-Modi (via Form-Feld "mode"):
-    wbpp       — WeightedBatchPreProcessing (vollständig, langsam)
-    fastbatch  — FastBatchProcessing (schneller, weniger Optionen)
-    shell_sim  — Shell-Simulation: kopiert Lights als "Master" (Test-Modus,
-                 kein PixInsight nötig — validiert den gesamten HTTP-Flow)
-
-Calibration-Frames:
-    Das Backend kann im Form-Feld "calibration_dir" einen Pfad auf dem Mac
-    schicken, wo Flats/Darks/Bias für das jeweilige Setup liegen. Diese werden
-    dem PixInsight-Skript als zusätzliches Argument --calib=<dir> übergeben.
-    Im shell_sim-Modus werden sie einfach mit in den Output-Ordner kopiert.
+Calibration-Frames (Flats/Darks/Bias) liegen im selben ZIP wie die Lights
+(vom Backend per SMB vom NAS geholt). Keine lokalen Mac-Pfade mehr nötig.
 
 Endpoints:
     GET  /health              — Health-Check
     POST /process             — Job annehmen (ZIP-Upload) & PixInsight starten
     GET  /status/<job_id>     — Job-Status abfragen
-    GET  /results/<job_id>   — Ergebnis-ZIP herunterladen ( wenn completed)
+    GET  /results/<job_id>    — Ergebnis-ZIP herunterladen (wenn completed)
     GET  /jobs                — Alle Jobs auflisten
     GET  /logs/<job_id>       — Log-Inhalt eines Jobs
     DELETE /jobs/<job_id>     — Abgeschlossenen Job löschen (inkl. Temp-Dateien)
@@ -57,6 +42,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+
 # ─── Logging-Setup (Console + Datei) ───
 LOG_FORMAT = "%(asctime)s [%(levelname)-7s] %(message)s"
 
@@ -67,9 +53,13 @@ log = logging.getLogger("cura-stro.agent")
 log.setLevel(logging.INFO)
 log.addHandler(_console_handler)
 log.propagate = False  # Verhindert doppelte Ausgabe via uvicorn-Root-Handler
+
+# Uvicorn-Access-Log reduzieren (nur Warnungen/Fehler)
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+
 # ─── Konfiguration (Umgebungsvariablen) ───
 AGENT_PORT = int(os.environ.get("AGENT_PORT", "7777"))
-AGENT_TOKEN = os.environ.get("AGENT_TOKEN", "")  # Shared-Secret mit Backend
+AGENT_TOKEN = os.environ.get("AGENT_TOKEN", "")
 PIXINSIGHT_BIN = os.environ.get(
     "PIXINSIGHT_BIN",
     "/Applications/PixInsight/PixInsight.app/Contents/MacOS/PixInsight",
@@ -81,21 +71,11 @@ BATCH_SCRIPT = os.environ.get(
 WORK_DIR = Path(os.environ.get("WORK_DIR", str(Path.home() / "cura-stro-jobs")))
 LOG_DIR = Path(os.environ.get("LOG_DIR", str(WORK_DIR / "logs")))
 MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "1"))
-# WBPP-Skript-Pfad (falls abweichend von der Standard-Installation).
-WBPP_SCRIPT = os.environ.get(
-    "WBPP_SCRIPT",
-    "/Applications/PixInsight/src/scripts/BatchProcessing/WeightedBatchPreProcessing.js",
-)
-# FastBatchProcessing-Skript-Pfad.
-FASTBATCH_SCRIPT = os.environ.get(
-    "FASTBATCH_SCRIPT",
-    "/Applications/PixInsight/src/scripts/BatchProcessing/FastBatchProcessing.js",
-)
 
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="cura-stro Mac-Agent", version="0.4.0")
+app = FastAPI(title="cura-stro Mac-Agent", version="0.5.0")
 
 
 # ─── Job-Tracking ───
@@ -107,10 +87,6 @@ class Job:
     result_zip: str        # Pfad zur Ergebnis-ZIP (wenn completed)
     frame_info: dict[str, Any]
     mode: str = "wbpp"     # wbpp · fastbatch · shell_sim
-    calibration_dir: str = ""  # Legacy: Pfad zu Flats/Darks/Bias auf dem Mac
-    flats_dir: str = ""        # Pfad zu Flats auf dem Mac
-    darks_dir: str = ""        # Pfad zu Darks auf dem Mac
-    bias_dir: str = ""         # Pfad zu Bias auf dem Mac
     status: str = "queued"  # queued · running · completed · failed
     started_at: str | None = None
     completed_at: str | None = None
@@ -198,11 +174,6 @@ async def _run_shell_sim(job: Job) -> None:
         log.info("Job %s — Shell-Simulation GESTARTET", job.id[:8])
         log.info("  Input:  %s", job.work_input)
         log.info("  Output: %s", job.work_output)
-        log.info("  Mode:   %s", job.mode)
-        log.info("  Calib:  %s", job.calibration_dir or "(keine)")
-        log.info("  Flats:  %s", job.flats_dir or "(keine)")
-        log.info("  Darks:  %s", job.darks_dir or "(keine)")
-        log.info("  Bias:   %s", job.bias_dir or "(keine)")
 
         log_file = LOG_DIR / f"{job.id}.log"
         job.log_file = str(log_file)
@@ -212,18 +183,12 @@ async def _run_shell_sim(job: Job) -> None:
                 flog.write(f"=== cura-stro Shell-Simulation (Job {job.id}) ===\n")
                 flog.write(f"Input:  {job.work_input}\n")
                 flog.write(f"Output: {job.work_output}\n")
-                flog.write(f"Mode:   {job.mode}\n")
-                flog.write(f"Calib:  {job.calibration_dir or '(keine)'}\n")
-                flog.write(f"Flats:  {job.flats_dir or '(keine)'}\n")
-                flog.write(f"Darks:  {job.darks_dir or '(keine)'}\n")
-                flog.write(f"Bias:   {job.bias_dir or '(keine)'}\n")
                 flog.write(f"Frame-Info: {json.dumps(job.frame_info, indent=2)}\n\n")
 
                 input_dir = Path(job.work_input)
                 output_dir = Path(job.work_output)
                 output_dir.mkdir(parents=True, exist_ok=True)
 
-                # Alle Dateien im Input-Verzeichnis listen
                 all_files = sorted(f for f in input_dir.rglob("*") if f.is_file())
                 counts = _count_frames(input_dir)
                 log.info("  Gefunden: %d Dateien (Lights: %d, Darks: %d, Flats: %d, Bias: %d, DarkFlats: %d)",
@@ -244,35 +209,6 @@ async def _run_shell_sim(job: Job) -> None:
                     else:
                         calib_files.append((f, ftype))
 
-                # Calibration-Frames aus den jeweiligen Verzeichnissen kopieren
-                calib_dirs = [
-                    ("flats_dir", job.flats_dir, "Flats"),
-                    ("darks_dir", job.darks_dir, "Darks"),
-                    ("bias_dir", job.bias_dir, "Bias"),
-                ]
-                # Legacy-Fallback: calibration_dir für alle drei verwenden
-                if job.calibration_dir and not (job.flats_dir or job.darks_dir or job.bias_dir):
-                    calib_dirs = [
-                        ("calibration_dir", job.calibration_dir, "Calibration (legacy)"),
-                    ]
-                for field_name, dir_path_str, label in calib_dirs:
-                    if not dir_path_str:
-                        continue
-                    calib_dir = Path(dir_path_str)
-                    if calib_dir.is_dir():
-                        calib_count = 0
-                        for f in sorted(calib_dir.rglob("*")):
-                            if f.is_file():
-                                ftype = _classify_frame(f.name)
-                                flog.write(f"  {f.name} → {ftype} (aus {label})\n")
-                                calib_files.append((f, ftype))
-                                calib_count += 1
-                        log.info("  %s: %d Dateien aus %s", label, calib_count, calib_dir)
-                    else:
-                        log.warning("  %s-Verzeichnis nicht gefunden: %s", label, calib_dir)
-                        flog.write(f"\nWARNUNG: {label}-Verzeichnis nicht gefunden: {calib_dir}\n")
-
-                # Simuliere "Master" — kopiere erste Light-Datei als master_light.xisf
                 log.info("  Verarbeite %d Light-Frames …", len(lights))
                 if lights:
                     master_path = output_dir / "master_light_simulated.xisf"
@@ -288,7 +224,6 @@ async def _run_shell_sim(job: Job) -> None:
                     log.info("  Kalibrierte Lights: %d Dateien", len(lights))
                     flog.write(f"Kalibrierte Lights: {len(lights)} Dateien\n")
 
-                # Calibration-Files in Output kopieren (für Referenz)
                 if calib_files:
                     calib_out = output_dir / "calibration"
                     calib_out.mkdir(exist_ok=True)
@@ -299,7 +234,6 @@ async def _run_shell_sim(job: Job) -> None:
                     log.info("  Calibration-Files kopiert: %d Dateien", len(calib_files))
                     flog.write(f"Calibration-Files: {len(calib_files)} Dateien\n")
 
-                # Ergebnis-Dateien listen
                 out_path = Path(job.work_output)
                 if out_path.is_dir():
                     job.result_files = sorted(
@@ -318,7 +252,6 @@ async def _run_shell_sim(job: Job) -> None:
             job.status = "completed"
             log.info("Job %s — Shell-Simulation ABGESCHLOSSEN", job.id[:8])
 
-            # Ergebnis als ZIP packen
             zip_path = Path(job.work_output).parent / f"{job.id}_results.zip"
             if out_path.is_dir() and any(out_path.iterdir()):
                 log.info("  Packe Ergebnis-ZIP …")
@@ -352,7 +285,6 @@ async def _run_pixinsight(job: Job) -> None:
         log.info("  Mode:   %s", job.mode)
         log.info("  Calib-Frames sind im ZIP enthalten (keine lokalen Pfade nötig)")
 
-        # Output-Verzeichnis sicherstellen
         Path(job.work_output).mkdir(parents=True, exist_ok=True)
 
         log_file = LOG_DIR / f"{job.id}.log"
@@ -362,31 +294,20 @@ async def _run_pixinsight(job: Job) -> None:
         info_file = Path(job.work_input).parent / f"{job.id}_info.json"
         info_file.write_text(json.dumps(job.frame_info, indent=2))
 
-        # Skript-Pfad je nach Modus
-        if job.mode == "fastbatch":
-            batch_script = BATCH_SCRIPT  # cura_batch.js unterstützt --mode
-            wbpp_path = os.environ.get("FASTBATCH_SCRIPT", FASTBATCH_SCRIPT)
-        else:
-            batch_script = BATCH_SCRIPT
-            wbpp_path = WBPP_SCRIPT
+        batch_script = BATCH_SCRIPT
 
         # Config-JSON für das Skript schreiben.
-        # PixInsight reicht keine beliebigen CLI-Argumente an Skripte weiter,
-        # daher übergeben wir alle Parameter über eine JSON-Datei.
         config_path = Path(job.work_input).parent / f"{job.id}_config.json"
         config = {
             "inputDir":  job.work_input,
             "outputDir": job.work_output,
             "infoFile":  str(info_file),
-            "wbppPath":  wbpp_path,
             "mode":      job.mode,
         }
         config_path.write_text(json.dumps(config, indent=2))
         log.info("  Config: %s", config_path)
 
         # Wrapper-JS generieren: setzt CURA_CONFIG_PATH und inkludiert cura_batch.js.
-        # Statt #include (nur für .jsh-Header gedacht) lesen wir cura_batch.js
-        # und inlinen den Inhalt direkt in den Wrapper.
         wrapper_path = Path(job.work_input).parent / f"{job.id}_wrapper.js"
         batch_source = Path(batch_script).read_text()
         wrapper_js = (
@@ -397,7 +318,6 @@ async def _run_pixinsight(job: Job) -> None:
         log.info("  Wrapper: %s (cura_batch.js inlined)", wrapper_path)
 
         # PixInsight CLI Aufruf: nur -r=<wrapper> --force-exit
-        # (keine weiteren Argumente — PixInsight lehnt unbekannte Flags ab)
         cmd = [
             PIXINSIGHT_BIN,
             f"-r={wrapper_path}",
@@ -406,7 +326,6 @@ async def _run_pixinsight(job: Job) -> None:
 
         log.info("  PixInsight CLI: %s", " ".join(cmd))
         log.info("  Skript: %s", batch_script)
-        log.info("  WBPP:   %s", wbpp_path)
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -422,7 +341,6 @@ async def _run_pixinsight(job: Job) -> None:
             if rc == 0:
                 job.status = "completed"
                 log.info("Job %s — PixInsight ABGESCHLOSSEN (exit 0)", job.id[:8])
-                # Ergebnis-Dateien listen
                 out_path = Path(job.work_output)
                 if out_path.is_dir():
                     job.result_files = sorted(
@@ -433,7 +351,6 @@ async def _run_pixinsight(job: Job) -> None:
                         }
                     )
                 log.info("  Ergebnis: %d Dateien", len(job.result_files))
-                # Ergebnis als ZIP packen
                 zip_path = Path(job.work_output).parent / f"{job.id}_results.zip"
                 if out_path.is_dir() and any(out_path.iterdir()):
                     log.info("  Packe Ergebnis-ZIP …")
@@ -459,7 +376,6 @@ async def _run_pixinsight(job: Job) -> None:
             log.error("Job %s — FEHLER: %s", job.id[:8], e, exc_info=True)
         finally:
             job.completed_at = _now_iso()
-            # Temp-Dateien aufräumen
             info_file.unlink(missing_ok=True)
             config_path.unlink(missing_ok=True)
             wrapper_path.unlink(missing_ok=True)
@@ -470,7 +386,7 @@ async def _run_pixinsight(job: Job) -> None:
 @app.on_event("startup")
 async def _startup():
     log.info("=" * 60)
-    log.info("cura-stro Mac-Agent v0.4.0 — startet")
+    log.info("cura-stro Mac-Agent v0.5.0 — startet")
     log.info("  Port:         %d", AGENT_PORT)
     log.info("  Work-Dir:     %s", WORK_DIR)
     log.info("  Log-Dir:      %s", LOG_DIR)
@@ -480,12 +396,6 @@ async def _startup():
     log.info("  Batch-Script: %s (%s)",
              BATCH_SCRIPT,
              "✓ gefunden" if Path(BATCH_SCRIPT).exists() else "✗ NICHT gefunden")
-    log.info("  WBPP:         %s (%s)",
-             WBPP_SCRIPT,
-             "✓ gefunden" if Path(WBPP_SCRIPT).exists() else "✗ nicht gefunden")
-    log.info("  FastBatch:    %s (%s)",
-             FASTBATCH_SCRIPT,
-             "✓ gefunden" if Path(FASTBATCH_SCRIPT).exists() else "✗ nicht gefunden")
     log.info("  Max parallel: %d", MAX_CONCURRENT)
     log.info("  Token:        %s", "aktiv" if AGENT_TOKEN else "deaktiviert (offen)")
     log.info("=" * 60)
@@ -495,18 +405,12 @@ async def _startup():
 async def health():
     pixinsight_ok = Path(PIXINSIGHT_BIN).exists()
     script_ok = Path(BATCH_SCRIPT).exists()
-    wbpp_ok = Path(WBPP_SCRIPT).exists() if WBPP_SCRIPT else False
-    fastbatch_ok = Path(FASTBATCH_SCRIPT).exists() if FASTBATCH_SCRIPT else False
     return {
         "status": "ok" if pixinsight_ok and script_ok else "degraded",
         "pixinsight_found": pixinsight_ok,
         "pixinsight_path": PIXINSIGHT_BIN,
         "batch_script_found": script_ok,
         "batch_script_path": BATCH_SCRIPT,
-        "wbpp_script_found": wbpp_ok,
-        "wbpp_script_path": WBPP_SCRIPT,
-        "fastbatch_script_found": fastbatch_ok,
-        "fastbatch_script_path": FASTBATCH_SCRIPT,
         "work_dir": str(WORK_DIR),
         "active_jobs": sum(1 for j in _jobs.values() if j.status == "running"),
         "total_jobs": len(_jobs),
@@ -532,7 +436,6 @@ async def process(
     log.info("  Upload:        %s (%s bytes)",
              file.filename, file.size if file.size else "?")
 
-    # Frame-Info parsen
     try:
         info = json.loads(frame_info) if frame_info else {}
     except json.JSONDecodeError:
@@ -540,7 +443,6 @@ async def process(
     if info:
         log.info("  Frame-Info:    %s", json.dumps(info, indent=2))
 
-    # Mode validieren
     if mode not in ("wbpp", "fastbatch", "shell_sim"):
         log.warning("  Unbekannter Mode '%s' → fallback auf wbpp", mode)
         mode = "wbpp"
@@ -578,7 +480,6 @@ async def process(
         log.error("  FEHLER beim Entpacken: %s", e)
         raise HTTPException(400, f"Fehler beim Entpacken: {e}")
 
-    # Prüfen, dass Dateien vorhanden sind
     raw_files = [f for f in input_dir.rglob("*") if f.is_file()]
     if not raw_files:
         log.error("  FEHLER: ZIP enthält keine Dateien")
@@ -596,14 +497,9 @@ async def process(
         result_zip="",
         frame_info=info,
         mode=mode,
-        calibration_dir="",
-        flats_dir="",
-        darks_dir="",
-        bias_dir="",
     )
     _jobs[job_id] = job
 
-    # Asynchron starten (nicht-blockierend)
     if mode == "shell_sim":
         log.info("  Starte Shell-Simulation …")
         asyncio.create_task(_run_shell_sim(job))
