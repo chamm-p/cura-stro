@@ -210,7 +210,10 @@ function buildMaster(frames, label, outPath, normalize) {
     P.images = images;
     P.inputHints = "fits-keywords normalize raw cfa signed-is-physical";
     P.combination = ImageIntegration.prototype.Average;
-    P.weightMode = ImageIntegration.prototype.Average;
+    // Master-Frames werden nicht gewichtet (wie WBPP): DontCare.
+    // ("Average" ist ein combination-Enum, kein weightMode-Wert.)
+    if (typeof ImageIntegration.prototype.DontCare !== "undefined")
+        P.weightMode = ImageIntegration.prototype.DontCare;
     P.weightKeyword = "";
     P.weightScale = ImageIntegration.prototype.WeightScale_BWMV;
     P.normalization = normalize
@@ -271,6 +274,17 @@ masterFlat = buildMaster(flats, "Flat", calDir + "/master_flat.xisf", true);
 flog("\n--- ImageCalibration ---");
 flush();
 
+var calibratedLights = [];
+
+if (masterBias == null && masterDark == null && masterFlat == null) {
+    // ImageCalibration braucht mindestens ein aktiviertes Master-Frame,
+    // sonst schlägt executeGlobal fehl. Ohne Calib-Frames: Lights direkt
+    // zum Alignment durchreichen.
+    flog("Keine Kalibrier-Frames (Bias/Dark/Flat) — Kalibrierung uebersprungen");
+    flush();
+    calibratedLights = lights;
+} else {
+
 var icInputs = [];
 for (var i = 0; i < lights.length; ++i) {
     // Format: [enabled, path]
@@ -299,7 +313,10 @@ ic.calibrateFlat = true;
 ic.optimizeDarks = true;
 ic.darkOptimizationThreshold = 0.000;
 ic.evaluateNoise = true;
-ic.noiseEvaluationAlgorithm = ImageCalibration.prototype.Iterative;
+// PI 1.8.9: gueltige Enum-Namen sind NoiseEvaluation_MRS / NoiseEvaluation_KSigma.
+// ("Iterative" existiert nicht -> undefined -> "invalid argument type"-Crash.)
+if (typeof ImageCalibration.prototype.NoiseEvaluation_MRS !== "undefined")
+    ic.noiseEvaluationAlgorithm = ImageCalibration.prototype.NoiseEvaluation_MRS;
 ic.outputDirectory = calDir;
 ic.outputExtension = ".xisf";
 ic.outputPostfix = "_c";
@@ -322,7 +339,6 @@ if (!icOk) {
 }
 
 // Kalibrierte Lights über outputData finden
-var calibratedLights = [];
 if (ic.outputData) {
     for (var c = 0; c < ic.outputData.length; ++c) {
         var filePath = ic.outputData[c][0]; // outputData.outputImage
@@ -337,6 +353,8 @@ if (calibratedLights.length === 0) {
 }
 flog("Kalibriert: " + calibratedLights.length + " Frames");
 flush();
+
+} // else (Kalibrierung mit Master-Frames)
 
 if (calibratedLights.length === 0) {
     console.criticalln("ImageCalibration lieferte keine Ergebnisse — Abbruch");
@@ -477,7 +495,11 @@ var ii = new ImageIntegration;
 ii.images = iiInputs;
 ii.inputHints = "fits-keywords normalize raw cfa signed-is-physical";
 ii.combination = ImageIntegration.prototype.Average;
-ii.weightMode = ImageIntegration.prototype.NoiseEvaluation;
+// Enum-Name je nach PI-Version: NoiseEvaluation (aelter) / PSFSignalWeight (1.8.9+).
+if (typeof ImageIntegration.prototype.PSFSignalWeight !== "undefined")
+    ii.weightMode = ImageIntegration.prototype.PSFSignalWeight;
+else if (typeof ImageIntegration.prototype.NoiseEvaluation !== "undefined")
+    ii.weightMode = ImageIntegration.prototype.NoiseEvaluation;
 ii.weightKeyword = "";
 ii.weightScale = ImageIntegration.prototype.WeightScale_BWMV;
 ii.adaptiveGridSize = 16;
