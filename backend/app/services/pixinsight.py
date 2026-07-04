@@ -721,17 +721,20 @@ async def precheck(
                 "message": f"{len(missing_archive)} Sub-Frame(s) ohne archive_path (nicht auf NAS abgelegt): {', '.join(missing_archive[:5])}{'…' if len(missing_archive) > 5 else ''}",
             })
 
-    # 2. Calibration-Dir aus Setup
+    # 2. Calibration-Dirs aus Setup (separate Pfade für Flats/Darks/Bias)
     calib_dirs = await _get_calibration_dirs(db, obs)
+    has_any = any(calib_dirs.values())
     calib_info: dict[str, Any] = {
-        "configured": bool(calibration_dir),
-        "path": calibration_dir or None,
+        "configured": has_any,
+        "flats_dir": calib_dirs.get("flats_dir") or None,
+        "darks_dir": calib_dirs.get("darks_dir") or None,
+        "bias_dir": calib_dirs.get("bias_dir") or None,
     }
-    if not calibration_dir:
+    if not has_any:
         warnings.append({
             "level": "warning",
             "code": "no_calibration_dir",
-            "message": "Kein Calibration-Verzeichnis für dieses Setup konfiguriert — Flats/Darks/Bias müssen im ZIP enthalten sein oder manuell in PixInsight geladen werden.",
+            "message": "Keine Calibration-Verzeichnisse für dieses Setup konfiguriert — Flats/Darks/Bias müssen im ZIP enthalten sein oder manuell in PixInsight geladen werden.",
         })
 
     # 3. Agent-Health
