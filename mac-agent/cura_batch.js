@@ -125,6 +125,26 @@ function classifyFrame(filepath) {
 // ─── Ab hier: alles in try/catch, damit Fehler im Datei-Log landen ───
 try {
 
+function filterOf(filepath) {
+    // Filter aus dem ASIAir-Dateinamen extrahieren:
+    //   Light_NGC 1499_300.0s_Bin1_OIII_20241225-210058_0010.fit
+    // → Token nach "BinN". Funktioniert auch für _c/_r-Postfixe, da diese
+    // nur hinten angehängt werden. Fallback: "NoFilter" (z. B. Farbkamera).
+    var name = filepath;
+    var slash = name.lastIndexOf('/');
+    if (slash >= 0) name = name.substring(slash + 1);
+    var dot = name.lastIndexOf('.');
+    if (dot >= 0) name = name.substring(0, dot);
+    var parts = name.split('_');
+    for (var i = 0; i < parts.length - 1; i++) {
+        if (/^bin\d+$/i.test(parts[i])) {
+            var f = parts[i + 1].replace(/[^A-Za-z0-9+-]/g, "");
+            if (f.length > 0 && !/^\d{8}/.test(f)) return f;
+        }
+    }
+    return "NoFilter";
+}
+
 // ─── Alle Dateien sammeln ───
 var allFiles = findImageFilesRecursive(inputDir);
 
@@ -474,21 +494,44 @@ if (alignedLights.length === 0) {
     throw new Error("StarAlignment produced no output");
 }
 
-// ─── 4. ImageIntegration (Stack) ───
-flog("\n--- ImageIntegration ---");
+// ─── 4. ImageIntegration (Stack) — getrennt je Filter ───
+// Alle Frames wurden gemeinsam auf EINE Referenz ausgerichtet; die
+// Filter-Master sind dadurch zueinander registriert und können später
+// direkt kombiniert werden (z. B. SHO).
+flog("\n--- ImageIntegration (je Filter) ---");
 flush();
 
 var objName = "result";
 if (frameInfo && frameInfo.object_name) {
     objName = frameInfo.object_name;
 }
-var masterName = "master_" + objName + ".xisf";
-var masterPath = outputDir + "/" + masterName;
+
+// Ausgerichtete Frames nach Filter gruppieren
+var filterGroups = {};
+for (var i = 0; i < alignedLights.length; ++i) {
+    var flt = filterOf(alignedLights[i]);
+    if (!filterGroups[flt]) filterGroups[flt] = [];
+    filterGroups[flt].push(alignedLights[i]);
+}
+var filterNames = [];
+for (var flt in filterGroups) filterNames.push(flt);
+filterNames.sort();
+
+flog("Filter-Gruppen: " + filterNames.length);
+for (var g = 0; g < filterNames.length; ++g) {
+    flog("  " + filterNames[g] + ": " + filterGroups[filterNames[g]].length + " Frames");
+}
+flush();
+
+function integrateGroup(frames, outPath, label) {
+
+flog("\nIntegriere " + label + " (" + frames.length + " Frames) → " + outPath);
+flush();
 
 var iiInputs = [];
-for (var i = 0; i < alignedLights.length; ++i) {
+for (var i = 0; i < frames.length; ++i) {
     // Format: [enabled, path, drizzlePath, localNormDataPath]
-    iiInputs.push([true, alignedLights[i], "", ""]);
+    iiInputs.push([true, frames[i], "", ""]);
 }
 
 var ii = new ImageIntegration;
@@ -568,26 +611,64 @@ processEvents();
 gc();
 
 if (!iiOk) {
-    console.criticalln("ImageIntegration fehlgeschlagen");
-    throw new Error("ImageIntegration failed");
+    flog("KRITISCH: ImageIntegration fehlgeschlagen (" + label + ")");
+    flush();
+    throw new Error("ImageIntegration failed: " + label);
 }
 
 // Ergebnis-Window über integrationImageId finden
 var intWin = ImageWindow.windowById(ii.integrationImageId);
 if (intWin.isNull) {
-    console.criticalln("ImageIntegration lieferte kein Ergebnis-Window");
-    throw new Error("ImageIntegration produced no window");
+    flog("KRITISCH: ImageIntegration lieferte kein Ergebnis-Window (" + label + ")");
+    flush();
+    throw new Error("ImageIntegration produced no window: " + label);
 }
 
 try {
-    saveImage(masterPath, intWin);
+    saveImage(outPath, intWin);
 } finally {
     intWin.forceClose();
 }
 
+flog("Master (" + label + ") gespeichert: " + outPath);
+flush();
+return outPath;
+
+} // integrateGroup
+
+// ImageIntegration braucht mindestens 3 Frames pro Stack.
+var masters = [];
+var skipped = [];
+for (var g = 0; g < filterNames.length; ++g) {
+    var flt = filterNames[g];
+    var frames = filterGroups[flt];
+    if (frames.length < 3) {
+        flog("WARNUNG: Filter " + flt + " hat nur " + frames.length +
+             " Frame(s) — Integration braucht min. 3, wird übersprungen");
+        flush();
+        skipped.push(flt);
+        continue;
+    }
+    var suffix = (filterNames.length === 1 && flt === "NoFilter") ? "" : "_" + flt;
+    var outPath = outputDir + "/master_" + objName + suffix + ".xisf";
+    masters.push(integrateGroup(frames, outPath, flt));
+}
+
+if (masters.length === 0) {
+    flog("KRITISCH: Keine Filter-Gruppe hatte genug Frames für einen Stack");
+    flush();
+    throw new Error("No filter group had enough frames to integrate");
+}
+
 flog("\n=== Batch abgeschlossen ===");
 flog("Output-Verzeichnis: " + outputDir);
-flog("Master: " + masterPath);
+flog("Master (" + masters.length + "):");
+for (var m = 0; m < masters.length; ++m) {
+    flog("  " + masters[m]);
+}
+if (skipped.length > 0) {
+    flog("Übersprungen (zu wenige Frames): " + skipped.join(", "));
+}
 flush();
 
 } catch (cura_err) {
