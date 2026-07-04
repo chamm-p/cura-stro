@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import { X, Upload, Trash2, Download, Loader2, FolderSearch, ImageOff, CheckCircle2, Radio, AlertTriangle } from 'lucide-react'
+import { useEffect, useRef, useState, useCallback } from 'react'
+import { X, Upload, Trash2, Download, Loader2, FolderSearch, ImageOff, CheckCircle2, Radio, AlertTriangle, Cpu, Clock, RefreshCw, FileCheck2 } from 'lucide-react'
 import api from '../services/api'
 import AuthImage from './AuthImage'
 
@@ -8,6 +8,8 @@ interface Res {
   source: string | null; created_at: string | null; preview_url: string; download_url: string
 }
 
+type PiStatus = 'idle' | 'starting' | 'running' | 'polling' | 'done' | 'error'
+
 function fmtSize(b: number | null) {
   if (!b) return ''
   const mb = b / (1024 * 1024)
@@ -15,8 +17,11 @@ function fmtSize(b: number | null) {
 }
 
 export default function ResultsModal({
-  observationId, label, telescopeName, onClose, onChanged,
-}: { observationId: string; label: string; telescopeName?: string | null; onClose: () => void; onChanged: () => void }) {
+  observationId, label, telescopeName, status, onClose, onChanged,
+}: {
+  observationId: string; label: string; telescopeName?: string | null
+  status?: string; onClose: () => void; onChanged: () => void
+}) {
   const [items, setItems] = useState<Res[]>([])
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -24,15 +29,120 @@ export default function ResultsModal({
   const [err, setErr] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
 
-  const load = () => {
+  // PixInsight-Batch-Status
+  const [piStatus, setPiStatus] = useState<PiStatus>('idle')
+  const [piJobId, setPiJobId] = useState<string | null>(null)
+  const [piMsg, setPiMsg] = useState('')
+  const [piResultCount, setPiResultCount] = useState<number | null>(null)
+  const [agentHealth, setAgentHealth] = useState<{ available: boolean; pixinsight_found?: boolean } | null>(null)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const load = useCallback(() => {
     setLoading(true)
     api.get(`/api/observations/${observationId}/results`).then((r) => setItems(r.data)).finally(() => setLoading(false))
-  }
-  useEffect(() => { load() }, [observationId])
+  }, [observationId])
+
+  useEffect(() => { load() }, [load])
+
+  // Agent-Health beim Öffnen prüfen
+  useEffect(() => {
+    api.get('/api/pixinsight/health').then((r) => setAgentHealth(r.data)).catch(() => setAgentHealth({ available: false }))
+  }, [])
+
+  // Polling aufräumen
+  useEffect(() => {
+    return () => { if (pollRef.current) clearInterval(pollRef.current) }
+  }, [])
+
   useEffect(() => {
     const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h)
   }, [onClose])
+
+  // ─── PixInsight Batch starten ───
+  const startBatch = async () => {
+    setPiStatus('starting'); setPiMsg(''); setErr('')
+    try {
+      const r = await api.post(`/api/observations/${observationId}/process`)
+      setPiJobId(r.data.job_id)
+      setPiStatus('running')
+      setPiMsg(`Batch gestartet — ${r.data.input_files || 0} RAW-Dateien an Mac-Agent übertragen.`)
+      // Polling starten
+      startPolling(r.data.job_id)
+    } catch (e: any) {
+      setPiStatus('error')
+      setErr(e.response?.data?.detail || 'Batch konnte nicht gestartet werden.')
+    }
+  }
+
+  // ─── Polling: Status abfragen, bei "completed" Ergebnisse abholen ───
+  const startPolling = (jobId: string) => {
+    if (pollRef.current) clearInterval(pollRef.current)
+    let pollCount = 0
+    pollRef.current = setInterval(async () => {
+      pollCount++
+      try {
+        const r = await api.get(`/api/pixinsight/status/${jobId}`)
+        const st = r.data.status
+        if (st === 'completed') {
+          // Ergebnis abholen
+          if (pollRef.current) clearInterval(pollRef.current)
+          setPiStatus('polling')
+          setPiMsg('Batch abgeschlossen — hole Ergebnisse vom Mac …')
+          try {
+            const poll = await api.post(`/api/observations/${observationId}/poll`, { job_id: jobId })
+            setPiStatus('done')
+            setPiResultCount(poll.data.result_count || 0)
+            setPiMsg(
+              poll.data.result_count > 0
+                ? `${poll.data.result_count} Ergebnis-Datei(en) ins Prepared-Verzeichnis geschrieben. Status → „vorbereitet".`
+                : 'Batch abgeschlossen, aber keine Ergebnis-Dateien gefunden.'
+            )
+            onChanged()
+          } catch (e: any) {
+            setPiStatus('error')
+            setErr(e.response?.data?.detail || 'Ergebnisse konnten nicht abgeholt werden.')
+          }
+        } else if (st === 'failed') {
+          if (pollRef.current) clearInterval(pollRef.current)
+          setPiStatus('error')
+          setErr(r.data.error || 'PixInsight-Batch fehlgeschlagen.')
+        } else {
+          // running / queued
+          setPiMsg(`PixInsight läuft … (${st})`)
+        }
+      } catch {
+        // Netzwerkfehler — weiter pollen
+      }
+      // Nach 30 Minuten aufgeben
+      if (pollCount > 360) {
+        if (pollRef.current) clearInterval(pollRef.current)
+        setPiStatus('error')
+        setErr('Timeout: Batch nach 30 Minuten noch nicht fertig.')
+      }
+    }, 5000)
+  }
+
+  // ─── Manuelles Ergebnis abholen (falls Polling abgebrochen) ───
+  const pollNow = async () => {
+    if (!piJobId) return
+    setPiStatus('polling'); setErr('')
+    try {
+      const poll = await api.post(`/api/observations/${observationId}/poll`, { job_id: piJobId })
+      if (poll.data.status === 'vorbereitet') {
+        setPiStatus('done')
+        setPiResultCount(poll.data.result_count || 0)
+        setPiMsg(`${poll.data.result_count || 0} Ergebnis-Datei(en) ins Prepared-Verzeichnis geschrieben.`)
+        onChanged()
+      } else {
+        setPiStatus('running')
+        setPiMsg(`Job-Status: ${poll.data.status || 'unbekannt'}`)
+      }
+    } catch (e: any) {
+      setPiStatus('error')
+      setErr(e.response?.data?.detail || 'Abholen fehlgeschlagen.')
+    }
+  }
 
   const upload = async (file: File) => {
     setBusy(true); setErr(''); setMsg('')
@@ -64,6 +174,10 @@ export default function ResultsModal({
 
   const del = async (id: string) => { await api.delete(`/api/observations/${observationId}/results/${id}`); load(); onChanged() }
 
+  // ─── PixInsight-Sektion anzeigen? ───
+  const showPiSection = status === 'raw' || status === 'in_bearbeitung' || status === 'vorbereitet' || piStatus !== 'idle'
+  const canStartBatch = status === 'raw' && piStatus === 'idle'
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
       <div className="max-h-[88vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-white/10 bg-[#0a0c18] p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
@@ -78,6 +192,95 @@ export default function ResultsModal({
           </div>
         )}
 
+        {/* ─── PixInsight Batch-Sektion ─── */}
+        {showPiSection && (
+          <div className="mb-4 rounded-xl border border-indigo-400/20 bg-indigo-500/5 p-4">
+            <div className="flex items-center gap-2 text-sm font-medium text-indigo-200">
+              <Cpu className="h-4 w-4" /> PixInsight-Batch (WBPP)
+            </div>
+
+            {/* Agent-Status */}
+            {agentHealth && !agentHealth.available && (
+              <div className="mt-2 flex items-center gap-2 rounded-lg border border-red-400/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> Mac-Agent nicht erreichbar — ist der Agent auf dem Mac gestartet?
+              </div>
+            )}
+            {agentHealth?.available && !agentHealth.pixinsight_found && (
+              <div className="mt-2 flex items-center gap-2 rounded-lg border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> Agent erreichbar, aber PixInsight nicht gefunden.
+              </div>
+            )}
+
+            {/* Status-Anzeige */}
+            {piStatus === 'running' && (
+              <div className="mt-2 flex items-center gap-2 text-sm text-blue-200">
+                <Loader2 className="h-4 w-4 animate-spin" /> {piMsg || 'PixInsight läuft …'}
+              </div>
+            )}
+            {piStatus === 'polling' && (
+              <div className="mt-2 flex items-center gap-2 text-sm text-cyan-200">
+                <Loader2 className="h-4 w-4 animate-spin" /> {piMsg}
+              </div>
+            )}
+            {piStatus === 'done' && (
+              <div className="mt-2 flex items-center gap-2 text-sm text-emerald-300">
+                <FileCheck2 className="h-4 w-4" /> {piMsg}
+                {piResultCount !== null && piResultCount > 0 && (
+                  <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-xs">{piResultCount} Dateien</span>
+                )}
+              </div>
+            )}
+            {piStatus === 'error' && err && (
+              <div className="mt-2 text-sm text-red-300">{err}</div>
+            )}
+
+            {/* Buttons */}
+            <div className="mt-3 flex flex-wrap gap-2">
+              {canStartBatch && (
+                <button
+                  onClick={startBatch}
+                  disabled={!agentHealth?.available}
+                  className="flex items-center gap-2 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3.5 py-2 text-sm font-medium text-white hover:from-indigo-400 hover:to-violet-500 disabled:opacity-50"
+                >
+                  <Cpu className="h-4 w-4" /> In PixInsight verarbeiten
+                </button>
+              )}
+              {piStatus === 'running' && piJobId && (
+                <button
+                  onClick={pollNow}
+                  className="flex items-center gap-2 rounded-lg border border-white/10 px-3.5 py-2 text-sm text-slate-200 hover:bg-white/10"
+                >
+                  <RefreshCw className="h-4 w-4" /> Jetzt abholen
+                </button>
+              )}
+              {piStatus === 'done' && (
+                <button
+                  onClick={() => { setPiStatus('idle'); setPiMsg(''); setPiResultCount(null); setErr('') }}
+                  className="flex items-center gap-2 rounded-lg border border-white/10 px-3.5 py-2 text-sm text-slate-200 hover:bg-white/10"
+                >
+                  <RefreshCw className="h-4 w-4" /> Zurücksetzen
+                </button>
+              )}
+            </div>
+
+            {/* Info-Text je nach Status */}
+            {status === 'in_bearbeitung' && piStatus === 'idle' && (
+              <p className="mt-2 text-xs text-slate-400">
+                <Clock className="mr-1 inline h-3 w-3" />
+                Batch läuft auf dem Mac. Klicke „Jetzt abholen", sobald PixInsight fertig ist.
+              </p>
+            )}
+            {status === 'vorbereitet' && (
+              <p className="mt-2 text-xs text-cyan-200/80">
+                <FileCheck2 className="mr-1 inline h-3 w-3" />
+                WBPP abgeschlossen — Master-Files liegen im <span className="font-mono">Prepared/</span>-Ordner.
+                Entwickle das Bild manuell in PixInsight und lade das Ergebnis hoch oder lege es in den <span className="font-mono">Developer/</span>-Ordner.
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* ─── Upload / Scan ─── */}
         <div className="flex flex-wrap gap-2">
           <input ref={fileRef} type="file" accept=".xisf,.tif,.tiff,.fit,.fits,.fts,.jpg,.jpeg,.png" className="hidden"
             onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(f) }} />
@@ -91,7 +294,7 @@ export default function ResultsModal({
         </div>
         <p className="mt-1.5 text-[11px] text-slate-500">Upload landet im NAS-Archiv unter <span className="font-mono">Developer/&lt;Objekt&gt;/&lt;Gerät&gt;/</span>. „Einlesen" sucht dort nach neuen Mastern (XISF/TIFF/FITS/JPG/PNG). Der Watch-Folder macht das auch automatisch.</p>
         {msg && <div className="mt-2 text-sm text-emerald-300">{msg}</div>}
-        {err && <div className="mt-2 text-sm text-red-300">{err}</div>}
+        {err && piStatus !== 'error' && <div className="mt-2 text-sm text-red-300">{err}</div>}
 
         <div className="mt-5 space-y-4">
           {loading ? (

@@ -19,6 +19,8 @@ interface Scope { id: string; name: string }
 const STATUS = [
   { v: 'geplant', label: 'geplant', cls: 'bg-slate-500/20 text-slate-200' },
   { v: 'raw', label: 'RAW', cls: 'bg-amber-500/20 text-amber-200' },
+  { v: 'in_bearbeitung', label: 'in Bearb.', cls: 'bg-blue-500/20 text-blue-200' },
+  { v: 'vorbereitet', label: 'vorbereitet', cls: 'bg-cyan-500/20 text-cyan-200' },
   { v: 'entwickelt', label: 'entwickelt', cls: 'bg-emerald-500/20 text-emerald-200' },
 ]
 const TYPE_LABEL: Record<string, string> = {
@@ -47,7 +49,7 @@ export default function Manage() {
   const [sortField, setSortField] = useState<string | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
-  const RANK: Record<string, number> = { geplant: 1, raw: 2, entwickelt: 3 }
+  const RANK: Record<string, number> = { geplant: 1, raw: 2, in_bearbeitung: 3, vorbereitet: 4, entwickelt: 5 }
   const sortVal = (r: Obs, f: string): number | string => {
     if (f === 'status') return RANK[r.status] ?? 0
     if (f === 'rating') return r.rating ?? -1
@@ -208,6 +210,7 @@ export default function Manage() {
           observationId={resFor.id}
           label={resFor.display_label}
           telescopeName={resFor.telescope_name}
+          status={resFor.status}
           onClose={() => setResFor(null)}
           onChanged={load}
         />
