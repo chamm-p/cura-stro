@@ -329,6 +329,27 @@ async def _write_prepared_to_storage(
     return written
 
 
+async def _cleanup_agent_job(agent_job_id: str) -> None:
+    """Sendet DELETE /jobs/{job_id} an den Agent, damit dieser seine
+    Temp-Dateien (Input + Output) restlos aufraeumt."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.delete(
+                await _agent_url(f"/jobs/{agent_job_id}"),
+                params={"token": await _agent_token()},
+            )
+            if resp.status_code == 200:
+                logger.info("PixInsight: Agent-Job %s aufgeraeumt (DELETE)", agent_job_id[:8])
+            elif resp.status_code == 404:
+                logger.debug("PixInsight: Agent-Job %s bereits geloescht", agent_job_id[:8])
+            else:
+                logger.warning("PixInsight: Agent-Cleanup returned %d", resp.status_code)
+    except Exception as e:
+        logger.warning("PixInsight: Agent-Cleanup fehlgeschlagen (nicht kritisch): %s", e)
+
+
+
+
 # ─── Hintergrund-Task: RAW-Dateien sammeln und an Agent senden ───
 async def _do_batch_transfer(
     job: BackendJob,
@@ -602,6 +623,10 @@ async def poll_job_results(
         await db.flush()
 
         bjob.status = "completed"
+
+        # Agent-Job restlos aufraeumen (Input + Output auf dem Mac loeschen)
+        if bjob.agent_job_id:
+            await _cleanup_agent_job(bjob.agent_job_id)
 
         return {
             "job_id": job_id,

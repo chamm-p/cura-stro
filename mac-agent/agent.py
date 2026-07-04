@@ -10,9 +10,15 @@ Alle Dateien werden über HTTP transferiert (kein SMB-Mount nötig):
     Backend liest NAS  →  zip  →  POST /process (multipart)  →  Agent
     Agent entpackt     →  PixInsight  →  zip  →  GET /results/{job_id}
     Backend entpackt   →  schreibt auf NAS (Prepared/)  →  Status: vorbereitet
+    Backend ruft DELETE /jobs/{job_id}  →  Agent räumt Input + Output auf
 
 Calibration-Frames (Flats/Darks/Bias) liegen im selben ZIP wie die Lights
 (vom Backend per SMB vom NAS geholt). Keine lokalen Mac-Pfade mehr nötig.
+
+Cleanup-Strategie (Platz sparen):
+    - Nach PixInsight-Fertigstellung: Input-Verzeichnis (RAW-Frames) löschen
+    - Nach erfolgreichem Ergebnis-Download: Output-Verzeichnis löschen
+    - DELETE /jobs/{job_id}: räumt alles restlose auf (Fallback)
 
 Endpoints:
     GET  /health              — Health-Check
@@ -40,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 # ─── Logging-Setup (Console + Datei) ───
@@ -81,7 +87,7 @@ MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "1"))
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="cura-stro Mac-Agent", version="0.6.0")
+app = FastAPI(title="cura-stro Mac-Agent", version="0.7.0")
 
 
 # ─── Job-Tracking ───
@@ -102,6 +108,8 @@ class Job:
     error: str | None = None
     result_files: list[str] = field(default_factory=list)
     result_zip_size: int = 0
+    input_cleaned: bool = False   # Input-Verzeichnis wurde gelöscht
+    output_cleaned: bool = False  # Output-Verzeichnis wurde gelöscht
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -140,6 +148,39 @@ def _zip_directory(src_dir: Path, zip_path: Path) -> int:
     size_mb = zip_path.stat().st_size / (1024 * 1024)
     log.info("  ZIP erstellt: %s (%d Dateien, %.1f MB)", zip_path.name, file_count, size_mb)
     return zip_path.stat().st_size
+
+
+def _cleanup_input(job: Job) -> None:
+    """Löscht das Input-Verzeichnis (RAW-Frames nicht mehr nötig nach Verarbeitung)."""
+    input_path = Path(job.work_input)
+    if input_path.exists() and input_path.is_dir():
+        try:
+            shutil.rmtree(input_path, ignore_errors=True)
+            job.input_cleaned = True
+            log.info("  Input aufgeräumt: %s", input_path)
+        except Exception as e:
+            log.warning("  Konnte Input nicht aufräumen: %s — %s", input_path, e)
+
+
+def _cleanup_output(job: Job) -> None:
+    """Löscht das Output-Verzeichnis und die Ergebnis-ZIP (nach erfolgreichem Download)."""
+    output_path = Path(job.work_output)
+    if output_path.exists() and output_path.is_dir():
+        try:
+            shutil.rmtree(output_path, ignore_errors=True)
+            job.output_cleaned = True
+            log.info("  Output aufgeräumt: %s", output_path)
+        except Exception as e:
+            log.warning("  Konnte Output nicht aufräumen: %s — %s", output_path, e)
+    # Ergebnis-ZIP auch löschen
+    if job.result_zip:
+        zip_path = Path(job.result_zip)
+        if zip_path.exists():
+            try:
+                zip_path.unlink(missing_ok=True)
+                log.info("  Ergebnis-ZIP gelöscht: %s", zip_path)
+            except Exception as e:
+                log.warning("  Konnte Ergebnis-ZIP nicht löschen: %s — %s", zip_path, e)
 
 
 def _classify_frame(filename: str) -> str:
@@ -268,6 +309,10 @@ async def _run_shell_sim(job: Job) -> None:
                 job.error = "Shell-Simulation lieferte keine Ergebnis-Dateien"
                 log.error("Job %s — FEHLER: keine Ergebnis-Dateien", job.id[:8])
 
+            # Input aufräumen (RAW-Frames nicht mehr nötig)
+            if job.status == "completed":
+                _cleanup_input(job)
+
         except Exception as e:
             job.status = "failed"
             job.error = str(e)
@@ -378,6 +423,9 @@ async def _run_pixinsight(job: Job) -> None:
                     log.info("  Packe Ergebnis-ZIP …")
                     job.result_zip_size = _zip_directory(out_path, zip_path)
                     job.result_zip = str(zip_path)
+
+                    # Input aufräumen (RAW-Frames nicht mehr nötig)
+                    _cleanup_input(job)
                 else:
                     job.status = "failed"
                     job.error = "PixInsight lieferte keine Ergebnis-Dateien"
@@ -407,7 +455,7 @@ async def _run_pixinsight(job: Job) -> None:
 @app.on_event("startup")
 async def _startup():
     log.info("=" * 60)
-    log.info("cura-stro Mac-Agent v0.6.0 — startet")
+    log.info("cura-stro Mac-Agent v0.7.0 — startet")
     log.info("  Port:         %d", AGENT_PORT)
     log.info("  Work-Dir:     %s", WORK_DIR)
     log.info("  Log-Dir:      %s", LOG_DIR)
@@ -501,6 +549,10 @@ async def process(
         log.error("  FEHLER beim Entpacken: %s", e)
         raise HTTPException(400, f"Fehler beim Entpacken: {e}")
 
+    # Upload-ZIP löschen (Platz sparen — entpackte Dateien reichen)
+    zip_path.unlink(missing_ok=True)
+    log.info("  Upload-ZIP gelöscht (Platz gespart)")
+
     raw_files = [f for f in input_dir.rglob("*") if f.is_file()]
     if not raw_files:
         log.error("  FEHLER: ZIP enthält keine Dateien")
@@ -551,7 +603,8 @@ async def job_status(job_id: str, token: str = ""):
 
 @app.get("/results/{job_id}")
 async def job_results(job_id: str, token: str = ""):
-    """Lädt die Ergebnis-ZIP eines abgeschlossenen Jobs herunter."""
+    """Lädt die Ergebnis-ZIP eines abgeschlossenen Jobs herunter.
+    Nach erfolgreichem Download wird das Output-Verzeichnis aufgeräumt."""
     _check_token(token)
     job = _jobs.get(job_id)
     if not job:
@@ -566,10 +619,18 @@ async def job_results(job_id: str, token: str = ""):
     size_mb = job.result_zip_size / (1024 * 1024)
     log.info("GET /results/%s — sende ZIP (%.1f MB, %d Dateien)",
              job_id[:8], size_mb, len(job.result_files))
-    return FileResponse(
-        job.result_zip,
+
+    # Ergebnis-ZIP in Memory lesen (vor dem Aufräumen)
+    zip_data = Path(job.result_zip).read_bytes()
+
+    # Output aufräumen (Ergebnisse wurden heruntergeladen → nicht mehr nötig)
+    _cleanup_output(job)
+
+    # Ergebnis-ZIP aus Memory senden (Datei auf Disk bereits gelöscht)
+    return Response(
+        content=zip_data,
         media_type="application/zip",
-        filename=f"{job_id}_results.zip",
+        headers={"Content-Disposition": f'attachment; filename="{job_id}_results.zip"'},
     )
 
 
@@ -581,7 +642,7 @@ async def list_jobs(token: str = ""):
 
 @app.delete("/jobs/{job_id}")
 async def delete_job(job_id: str, token: str = ""):
-    """Entfernt einen Job und seine Temp-Dateien."""
+    """Entfernt einen Job und seine Temp-Dateien (restloses Aufräumen)."""
     _check_token(token)
     job = _jobs.pop(job_id, None)
     if not job:
