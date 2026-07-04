@@ -373,26 +373,42 @@ async def _run_pixinsight(job: Job) -> None:
             batch_script = BATCH_SCRIPT
             wbpp_path = WBPP_SCRIPT
 
-        # PixInsight CLI Aufruf
+        # Config-JSON für das Skript schreiben.
+        # PixInsight reicht keine beliebigen CLI-Argumente an Skripte weiter,
+        # daher übergeben wir alle Parameter über eine JSON-Datei.
+        config_path = Path(job.work_input).parent / f"{job.id}_config.json"
+        config = {
+            "inputDir":  job.work_input,
+            "outputDir": job.work_output,
+            "infoFile":  str(info_file),
+            "wbppPath":  wbpp_path,
+            "mode":      job.mode,
+            "calibDir":  job.calibration_dir,
+            "flatsDir":  job.flats_dir,
+            "darksDir":  job.darks_dir,
+            "biasDir":   job.bias_dir,
+        }
+        config_path.write_text(json.dumps(config, indent=2))
+        log.info("  Config: %s", config_path)
+
+        # Wrapper-JS generieren: setzt CURA_CONFIG_PATH und inkludiert cura_batch.js
+        wrapper_path = Path(job.work_input).parent / f"{job.id}_wrapper.js"
+        wrapper_js = (
+            "var CURA_CONFIG_PATH = " + json.dumps(str(config_path)) + ";\n"
+            "#include " + json.dumps(batch_script) + "\n"
+        )
+        wrapper_path.write_text(wrapper_js)
+        log.info("  Wrapper: %s", wrapper_path)
+
+        # PixInsight CLI Aufruf: nur -r=<wrapper> --force-exit
+        # (keine weiteren Argumente — PixInsight lehnt unbekannte Flags ab)
         cmd = [
             PIXINSIGHT_BIN,
-            f"-run={batch_script}",
-            f"--input={job.work_input}",
-            f"--output={job.work_output}",
-            f"--info={info_file}",
-            f"--wbpp={wbpp_path}",
-            f"--mode={job.mode}",
+            f"-r={wrapper_path}",
+            "--force-exit",
         ]
-        if job.calibration_dir:
-            cmd.append(f"--calib={job.calibration_dir}")
-        if job.flats_dir:
-            cmd.append(f"--flats={job.flats_dir}")
-        if job.darks_dir:
-            cmd.append(f"--darks={job.darks_dir}")
-        if job.bias_dir:
-            cmd.append(f"--bias={job.bias_dir}")
 
-        log.info("  PixInsight CLI: %s", " ".join(cmd[:2]) + " …")
+        log.info("  PixInsight CLI: %s", " ".join(cmd))
         log.info("  Skript: %s", batch_script)
         log.info("  WBPP:   %s", wbpp_path)
 
@@ -447,8 +463,10 @@ async def _run_pixinsight(job: Job) -> None:
             log.error("Job %s — FEHLER: %s", job.id[:8], e, exc_info=True)
         finally:
             job.completed_at = _now_iso()
-            # Temp-Info-Datei aufräumen
+            # Temp-Dateien aufräumen
             info_file.unlink(missing_ok=True)
+            config_path.unlink(missing_ok=True)
+            wrapper_path.unlink(missing_ok=True)
             log.info("=" * 60)
 
 

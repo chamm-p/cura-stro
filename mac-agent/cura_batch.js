@@ -1,7 +1,13 @@
 /* cura_batch.js — PixInsight PJSR Batch-Skript (WBPP-Wrapper)
  *
- * Wird headless vom Mac-Agent aufgerufen:
- *   PixInsight -run=cura_batch.js --input=<dir> --output=<dir> --info=<json> --wbpp=<path> --mode=<wbpp|fastbatch> --calib=<dir> --flats=<dir> --darks=<dir> --bias=<dir>
+ * Wird headless vom Mac-Agent aufgerufen. Da PixInsight keine beliebigen
+ * CLI-Argumente an Skripte weiterreicht, übergibt der Agent die Parameter
+ * über eine JSON-Config-Datei. Der Wrapper setzt die globale Variable
+ * CURA_CONFIG_PATH, dieses Skript liest sie aus.
+ *
+ * Bei manueller Ausführung (ohne CURA_CONFIG_PATH) werden argv-Argumente
+ * geparsed:
+ *   PixInsight -r=cura_batch.js --input=<dir> --output=<dir> ...
  *
  * Dieses Skript ist ein DÜNNER WRAPPER um das WeightedBatchPreProcessing (WBPP)-
  * Skript von PixInsight. WBPP übernimmt die komplette Vorverarbeitung:
@@ -29,7 +35,7 @@
 
 #include <pjsr/DataType.jsh>
 
-// ─── Argumente parsen ───
+// ─── Parameter laden (Config-Datei oder argv) ───
 var inputDir = "";
 var outputDir = "";
 var infoFile = "";
@@ -40,26 +46,49 @@ var flatsDir = "";   // Separate Verzeichnisse
 var darksDir = "";
 var biasDir = "";
 
-for (var i = 0; i < argc; ++i) {
-    var arg = argv[i];
-    if (arg.startsWith("--input="))
-        inputDir = arg.substring(8);
-    else if (arg.startsWith("--output="))
-        outputDir = arg.substring(9);
-    else if (arg.startsWith("--info="))
-        infoFile = arg.substring(7);
-    else if (arg.startsWith("--wbpp="))
-        wbppPath = arg.substring(7);
-    else if (arg.startsWith("--mode="))
-        mode = arg.substring(7);
-    else if (arg.startsWith("--calib="))
-        calibDir = arg.substring(8);
-    else if (arg.startsWith("--flats="))
-        flatsDir = arg.substring(8);
-    else if (arg.startsWith("--darks="))
-        darksDir = arg.substring(8);
-    else if (arg.startsWith("--bias="))
-        biasDir = arg.substring(7);
+if (typeof CURA_CONFIG_PATH !== "undefined" && CURA_CONFIG_PATH && !CURA_CONFIG_PATH.isEmpty()) {
+    // Aufruf durch Mac-Agent: Config aus JSON-Datei lesen
+    console.writeln("Lade Konfiguration aus: " + CURA_CONFIG_PATH);
+    try {
+        var configText = File.readTextFile(CURA_CONFIG_PATH);
+        var config = JSON.parse(configText);
+        inputDir  = config.inputDir  || "";
+        outputDir = config.outputDir || "";
+        infoFile  = config.infoFile  || "";
+        wbppPath  = config.wbppPath  || "";
+        mode      = config.mode      || "wbpp";
+        calibDir  = config.calibDir  || "";
+        flatsDir  = config.flatsDir  || "";
+        darksDir  = config.darksDir  || "";
+        biasDir   = config.biasDir   || "";
+    } catch (e) {
+        console.criticalln("Fehler beim Lesen der Config-Datei: " + e);
+        throw e;
+    }
+} else {
+    // Manuelle Ausführung: argv parsen
+    console.writeln("Keine Config-Datei — parse argv");
+    for (var i = 0; i < argc; ++i) {
+        var arg = argv[i];
+        if (arg.startsWith("--input="))
+            inputDir = arg.substring(8);
+        else if (arg.startsWith("--output="))
+            outputDir = arg.substring(9);
+        else if (arg.startsWith("--info="))
+            infoFile = arg.substring(7);
+        else if (arg.startsWith("--wbpp="))
+            wbppPath = arg.substring(7);
+        else if (arg.startsWith("--mode="))
+            mode = arg.substring(7);
+        else if (arg.startsWith("--calib="))
+            calibDir = arg.substring(8);
+        else if (arg.startsWith("--flats="))
+            flatsDir = arg.substring(8);
+        else if (arg.startsWith("--darks="))
+            darksDir = arg.substring(8);
+        else if (arg.startsWith("--bias="))
+            biasDir = arg.substring(7);
+    }
 }
 
 if (inputDir.isEmpty() || outputDir.isEmpty()) {
@@ -100,7 +129,7 @@ function listFiles(dir) {
     var search = new SearchFile;
     search.directory = dir;
     search.pattern = "*";
-    search.matchMode = SearchFile.Mode递;
+    search.matchMode = SearchFile.Mode;
     search.recursive = true;
     search.execute();
     for (var i = 0; i < search.length; ++i) {
