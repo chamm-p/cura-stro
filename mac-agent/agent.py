@@ -66,7 +66,7 @@ PIXINSIGHT_BIN = os.environ.get(
 )
 BATCH_SCRIPT = os.environ.get(
     "BATCH_SCRIPT",
-    str(Path(__file__.parent / "cura_batch.js")),
+    str(Path(__file__).parent / "cura_batch.js"),
 )
 WORK_DIR = Path(os.environ.get("WORK_DIR", str(Path.home() / "cura-stro-jobs")))
 LOG_DIR = Path(os.environ.get("LOG_DIR", str(WORK_DIR / "logs")))
