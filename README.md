@@ -86,3 +86,4 @@ hips2fits-Previews), **Phase 4** (Astrowetter via Open-Meteo, Mondlicht-
 Warnungen, meteoblue-Seeing-Scraper), **Phase 5** (Verwaltung), **Phase 6**
 (FITS/XISF/TIFF-Upload + Analyse + JPG), **Phase 7** (Framing-/Belichtungs-
 rechner), **Phase 3b** (Objekt-Hintergrundinfos), **Phase 8** (MCP-Server).
+Test commit - Fri Jul  3 21:05:38 UTC 2026
