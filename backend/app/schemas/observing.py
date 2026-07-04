@@ -93,12 +93,18 @@ class SetupCreate(BaseModel):
     name: str | None = Field(default=None, max_length=160)
     filter_ids: list[str] = []
     calibration_dir: str | None = Field(default=None, max_length=500)
+    flats_dir: str | None = Field(default=None, max_length=500)
+    darks_dir: str | None = Field(default=None, max_length=500)
+    bias_dir: str | None = Field(default=None, max_length=500)
 
 
 class SetupUpdate(BaseModel):
     name: str | None = Field(default=None, max_length=160)
     filter_ids: list[str] | None = None
     calibration_dir: str | None = Field(default=None, max_length=500)
+    flats_dir: str | None = Field(default=None, max_length=500)
+    darks_dir: str | None = Field(default=None, max_length=500)
+    bias_dir: str | None = Field(default=None, max_length=500)
 
 
 class SetupFilterOut(BaseModel):
@@ -118,6 +124,9 @@ class SetupOut(BaseModel):
     focal_ratio: float | None = None
     filters: list[SetupFilterOut] = []
     calibration_dir: str | None = None
+    flats_dir: str | None = None
+    darks_dir: str | None = None
+    bias_dir: str | None = None
 
 
 # ─── Settings ───

@@ -1,7 +1,7 @@
 /* cura_batch.js — PixInsight PJSR Batch-Skript (WBPP-Wrapper)
  *
  * Wird headless vom Mac-Agent aufgerufen:
- *   PixInsight -run=cura_batch.js --input=<dir> --output=<dir> --info=<json> --wbpp=<path> --mode=<wbpp|fastbatch> --calib=<dir>
+ *   PixInsight -run=cura_batch.js --input=<dir> --output=<dir> --info=<json> --wbpp=<path> --mode=<wbpp|fastbatch> --calib=<dir> --flats=<dir> --darks=<dir> --bias=<dir>
  *
  * Dieses Skript ist ein DÜNNER WRAPPER um das WeightedBatchPreProcessing (WBPP)-
  * Skript von PixInsight. WBPP übernimmt die komplette Vorverarbeitung:
@@ -34,6 +34,11 @@ var inputDir = "";
 var outputDir = "";
 var infoFile = "";
 var wbppPath = "";
+var mode = "wbpp";
+var calibDir = "";   // Legacy: alle Calib-Frames in einem Verzeichnis
+var flatsDir = "";   // Separate Verzeichnisse
+var darksDir = "";
+var biasDir = "";
 
 for (var i = 0; i < argc; ++i) {
     var arg = argv[i];
@@ -45,6 +50,16 @@ for (var i = 0; i < argc; ++i) {
         infoFile = arg.substring(7);
     else if (arg.startsWith("--wbpp="))
         wbppPath = arg.substring(7);
+    else if (arg.startsWith("--mode="))
+        mode = arg.substring(7);
+    else if (arg.startsWith("--calib="))
+        calibDir = arg.substring(8);
+    else if (arg.startsWith("--flats="))
+        flatsDir = arg.substring(8);
+    else if (arg.startsWith("--darks="))
+        darksDir = arg.substring(8);
+    else if (arg.startsWith("--bias="))
+        biasDir = arg.substring(7);
 }
 
 if (inputDir.isEmpty() || outputDir.isEmpty()) {
@@ -58,6 +73,9 @@ console.writeln("Output: " + outputDir);
 console.writeln("WBPP:   " + (wbppPath.isEmpty() ? "(nicht angegeben)" : wbppPath));
 console.writeln("Mode:   " + mode);
 console.writeln("Calib:  " + (calibDir.isEmpty() ? "(keine)" : calibDir));
+console.writeln("Flats:  " + (flatsDir.isEmpty() ? "(keine)" : flatsDir));
+console.writeln("Darks:  " + (darksDir.isEmpty() ? "(keine)" : darksDir));
+console.writeln("Bias:   " + (biasDir.isEmpty() ? "(keine)" : biasDir));
 
 // ─── Frame-Info laden (optional) ───
 var frameInfo = {};
@@ -74,6 +92,45 @@ if (!infoFile.isEmpty() && File.exists(infoFile)) {
 // ─── Output-Verzeichnis sicherstellen ───
 if (!File.directoryExists(outputDir)) {
     File.createDirectory(outputDir, true);
+}
+
+// ─── Hilfsfunktionen (früh definiert, für WBPP und Fallback) ───
+function listFiles(dir) {
+    var files = [];
+    var search = new SearchFile;
+    search.directory = dir;
+    search.pattern = "*";
+    search.matchMode = SearchFile.Mode递;
+    search.recursive = true;
+    search.execute();
+    for (var i = 0; i < search.length; ++i) {
+        if (!search.isDirectory(i)) {
+            files.push(search.fullPath(i));
+        }
+    }
+    return files;
+}
+
+function classifyFrame(filename) {
+    var base = File.extractName(filename);
+    var lower = base.toLowerCase();
+    if (lower.startsWith("darkflat") || lower.startsWith("darkflat_"))
+        return "darkflat";
+    if (lower.startsWith("light") || lower.startsWith("light_"))
+        return "light";
+    if (lower.startsWith("dark") || lower.startsWith("dark_"))
+        return "dark";
+    if (lower.startsWith("flat") || lower.startsWith("flat_"))
+        return "flat";
+    if (lower.startsWith("bias") || lower.startsWith("bias_"))
+        return "bias";
+    return "light";
+}
+
+function isImageFile(filename) {
+    var ext = File.extractExtension(filename).toLowerCase();
+    return ext === "fit" || ext === "fits" || ext === "fts" ||
+           ext === "xisf" || ext === "tif" || ext === "tiff";
 }
 
 // ─── Versuch 1: WBPP aufrufen ───
@@ -131,17 +188,34 @@ if (!wbppPath.isEmpty() && File.exists(wbppPath)) {
         console.writeln("Input-Verzeichnis: " + inputDir);
         console.writeln("Output-Verzeichnis: " + outputDir);
 
-        // WBPP per include laden — es registriert sich selbst und führt
-        // die Verarbeitung durch, wenn die Parameter gesetzt sind.
-        //
-        // WICHTIG: WBPP muss im Kontext von PixInsight ausgeführt werden.
-        // Der -run= Mechanismus lädt das Skript und führt es aus.
-        // Wir nutzen eval(), um das WBPP-Skript im aktuellen Kontext
-        // auszuführen, nachdem wir die Parameter gesetzt haben.
+        // Calibration-Frames in das Input-Verzeichnis kopieren, damit WBPP
+        // sie automatisch erkennt (WBPP nutzt Dateinamen-Präfixe).
+        var calibDirsToCopy = [
+            { path: flatsDir, label: "Flats" },
+            { path: darksDir, label: "Darks" },
+            { path: biasDir,  label: "Bias"  },
+        ];
+        if (!calibDir.isEmpty() && flatsDir.isEmpty() && darksDir.isEmpty() && biasDir.isEmpty()) {
+            calibDirsToCopy = [{ path: calibDir, label: "Calibration (legacy)" }];
+        }
+        for (var cd = 0; cd < calibDirsToCopy.length; ++cd) {
+            var cdir = calibDirsToCopy[cd].path;
+            var clabel = calibDirsToCopy[cd].label;
+            if (!cdir.isEmpty() && File.directoryExists(cdir)) {
+                console.writeln("Kopiere " + clabel + " in Input-Verzeichnis: " + cdir);
+                var calibFiles = listFiles(cdir);
+                for (var ci = 0; ci < calibFiles.length; ++ci) {
+                    if (isImageFile(calibFiles[ci])) {
+                        var destFile = inputDir + "/" + File.extractName(calibFiles[ci]) + "." + File.extractExtension(calibFiles[ci]);
+                        File.copy(calibFiles[ci], destFile);
+                    }
+                }
+            } else if (!cdir.isEmpty()) {
+                console.warningln(clabel + "-Verzeichnis nicht gefunden: " + cdir);
+            }
+        }
 
-        // Alternative: WBPP direkt als -run= aufrufen lassen.
-        // Da wir aber schon als -run=cura_batch.js laufen, nutzen wir
-        // die ScriptEngine, um WBPP nachzuladen.
+        // WBPP per ScriptEngine laden und ausführen
         var engine = new ScriptEngine;
         engine.run(wbppPath, [
             "--input=" + inputDir,
@@ -167,55 +241,33 @@ if (!wbppPath.isEmpty() && File.exists(wbppPath)) {
 if (!wbppSuccess) {
     console.writeln("\n--- Manueller Durchlauf (IC → SA → II) ---");
 
-    // Dateien nach Frame-Typ sortieren
-    function listFiles(dir) {
-        var files = [];
-        var search = new SearchFile;
-        search.directory = dir;
-        search.pattern = "*";
-        search.matchMode = SearchFile.Mode递;
-        search.recursive = true;
-        search.execute();
-        for (var i = 0; i < search.length; ++i) {
-            if (!search.isDirectory(i)) {
-                files.push(search.fullPath(i));
-            }
-        }
-        return files;
-    }
-
-    function classifyFrame(filename) {
-        var base = File.extractName(filename);
-        var lower = base.toLowerCase();
-        if (lower.startsWith("darkflat") || lower.startsWith("darkflat_"))
-            return "darkflat";
-        if (lower.startsWith("light") || lower.startsWith("light_"))
-            return "light";
-        if (lower.startsWith("dark") || lower.startsWith("dark_"))
-            return "dark";
-        if (lower.startsWith("flat") || lower.startsWith("flat_"))
-            return "flat";
-        if (lower.startsWith("bias") || lower.startsWith("bias_"))
-            return "bias";
-        return "light";
-    }
-
-    function isImageFile(filename) {
-        var ext = File.extractExtension(filename).toLowerCase();
-        return ext === "fit" || ext === "fits" || ext === "fts" ||
-               ext === "xisf" || ext === "tif" || ext === "tiff";
-    }
-
+    // Dateien nach Frame-Typ sortieren (Hilfsfunktionen oben definiert)
     var allFiles = listFiles(inputDir);
 
-    // Calibration-Frames aus calibDir hinzufügen (falls angegeben)
-    if (!calibDir.isEmpty() && File.directoryExists(calibDir)) {
-        console.writeln("Lade Calibration-Frames aus: " + calibDir);
-        var calibFiles = listFiles(calibDir);
-        for (var ci = 0; ci < calibFiles.length; ++ci) {
-            if (isImageFile(calibFiles[ci])) {
-                allFiles.push(calibFiles[ci]);
+    // Calibration-Frames aus den jeweiligen Verzeichnissen hinzufügen
+    // Separate Verzeichnisse (bevorzugt)
+    var calibDirs = [
+        { path: flatsDir, label: "Flats" },
+        { path: darksDir, label: "Darks" },
+        { path: biasDir,  label: "Bias"  },
+    ];
+    // Legacy-Fallback: calibDir für alle verwenden, wenn keine separaten gesetzt
+    if (!calibDir.isEmpty() && flatsDir.isEmpty() && darksDir.isEmpty() && biasDir.isEmpty()) {
+        calibDirs = [{ path: calibDir, label: "Calibration (legacy)" }];
+    }
+    for (var cd = 0; cd < calibDirs.length; ++cd) {
+        var cdir = calibDirs[cd].path;
+        var clabel = calibDirs[cd].label;
+        if (!cdir.isEmpty() && File.directoryExists(cdir)) {
+            console.writeln("Lade " + clabel + " aus: " + cdir);
+            var calibFiles = listFiles(cdir);
+            for (var ci = 0; ci < calibFiles.length; ++ci) {
+                if (isImageFile(calibFiles[ci])) {
+                    allFiles.push(calibFiles[ci]);
+                }
             }
+        } else if (!cdir.isEmpty()) {
+            console.warningln(clabel + "-Verzeichnis nicht gefunden: " + cdir);
         }
     }
 

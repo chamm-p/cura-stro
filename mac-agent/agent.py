@@ -107,7 +107,10 @@ class Job:
     result_zip: str        # Pfad zur Ergebnis-ZIP (wenn completed)
     frame_info: dict[str, Any]
     mode: str = "wbpp"     # wbpp · fastbatch · shell_sim
-    calibration_dir: str = ""  # Pfad zu Flats/Darks/Bias auf dem Mac
+    calibration_dir: str = ""  # Legacy: Pfad zu Flats/Darks/Bias auf dem Mac
+    flats_dir: str = ""        # Pfad zu Flats auf dem Mac
+    darks_dir: str = ""        # Pfad zu Darks auf dem Mac
+    bias_dir: str = ""         # Pfad zu Bias auf dem Mac
     status: str = "queued"  # queued · running · completed · failed
     started_at: str | None = None
     completed_at: str | None = None
@@ -197,6 +200,9 @@ async def _run_shell_sim(job: Job) -> None:
         log.info("  Output: %s", job.work_output)
         log.info("  Mode:   %s", job.mode)
         log.info("  Calib:  %s", job.calibration_dir or "(keine)")
+        log.info("  Flats:  %s", job.flats_dir or "(keine)")
+        log.info("  Darks:  %s", job.darks_dir or "(keine)")
+        log.info("  Bias:   %s", job.bias_dir or "(keine)")
 
         log_file = LOG_DIR / f"{job.id}.log"
         job.log_file = str(log_file)
@@ -208,6 +214,9 @@ async def _run_shell_sim(job: Job) -> None:
                 flog.write(f"Output: {job.work_output}\n")
                 flog.write(f"Mode:   {job.mode}\n")
                 flog.write(f"Calib:  {job.calibration_dir or '(keine)'}\n")
+                flog.write(f"Flats:  {job.flats_dir or '(keine)'}\n")
+                flog.write(f"Darks:  {job.darks_dir or '(keine)'}\n")
+                flog.write(f"Bias:   {job.bias_dir or '(keine)'}\n")
                 flog.write(f"Frame-Info: {json.dumps(job.frame_info, indent=2)}\n\n")
 
                 input_dir = Path(job.work_input)
@@ -235,21 +244,33 @@ async def _run_shell_sim(job: Job) -> None:
                     else:
                         calib_files.append((f, ftype))
 
-                # Calibration-Frames aus calibration_dir kopieren (falls angegeben)
-                if job.calibration_dir:
-                    calib_dir = Path(job.calibration_dir)
+                # Calibration-Frames aus den jeweiligen Verzeichnissen kopieren
+                calib_dirs = [
+                    ("flats_dir", job.flats_dir, "Flats"),
+                    ("darks_dir", job.darks_dir, "Darks"),
+                    ("bias_dir", job.bias_dir, "Bias"),
+                ]
+                # Legacy-Fallback: calibration_dir für alle drei verwenden
+                if job.calibration_dir and not (job.flats_dir or job.darks_dir or job.bias_dir):
+                    calib_dirs = [
+                        ("calibration_dir", job.calibration_dir, "Calibration (legacy)"),
+                    ]
+                for field_name, dir_path_str, label in calib_dirs:
+                    if not dir_path_str:
+                        continue
+                    calib_dir = Path(dir_path_str)
                     if calib_dir.is_dir():
                         calib_count = 0
                         for f in sorted(calib_dir.rglob("*")):
                             if f.is_file():
                                 ftype = _classify_frame(f.name)
-                                flog.write(f"  {f.name} → {ftype} (aus calib_dir)\n")
+                                flog.write(f"  {f.name} → {ftype} (aus {label})\n")
                                 calib_files.append((f, ftype))
                                 calib_count += 1
-                        log.info("  Calibration-Verzeichnis: %d Dateien aus %s", calib_count, calib_dir)
+                        log.info("  %s: %d Dateien aus %s", label, calib_count, calib_dir)
                     else:
-                        log.warning("  Calibration-Verzeichnis nicht gefunden: %s", calib_dir)
-                        flog.write(f"\nWARNUNG: Calibration-Verzeichnis nicht gefunden: {calib_dir}\n")
+                        log.warning("  %s-Verzeichnis nicht gefunden: %s", label, calib_dir)
+                        flog.write(f"\nWARNUNG: {label}-Verzeichnis nicht gefunden: {calib_dir}\n")
 
                 # Simuliere "Master" — kopiere erste Light-Datei als master_light.xisf
                 log.info("  Verarbeite %d Light-Frames …", len(lights))
@@ -330,6 +351,9 @@ async def _run_pixinsight(job: Job) -> None:
         log.info("  Output: %s", job.work_output)
         log.info("  Mode:   %s", job.mode)
         log.info("  Calib:  %s", job.calibration_dir or "(keine)")
+        log.info("  Flats:  %s", job.flats_dir or "(keine)")
+        log.info("  Darks:  %s", job.darks_dir or "(keine)")
+        log.info("  Bias:   %s", job.bias_dir or "(keine)")
 
         # Output-Verzeichnis sicherstellen
         Path(job.work_output).mkdir(parents=True, exist_ok=True)
@@ -361,6 +385,12 @@ async def _run_pixinsight(job: Job) -> None:
         ]
         if job.calibration_dir:
             cmd.append(f"--calib={job.calibration_dir}")
+        if job.flats_dir:
+            cmd.append(f"--flats={job.flats_dir}")
+        if job.darks_dir:
+            cmd.append(f"--darks={job.darks_dir}")
+        if job.bias_dir:
+            cmd.append(f"--bias={job.bias_dir}")
 
         log.info("  PixInsight CLI: %s", " ".join(cmd[:2]) + " …")
         log.info("  Skript: %s", batch_script)
@@ -475,7 +505,10 @@ async def process(
     file: UploadFile = File(..., description="ZIP mit RAW-Frames (Lights/Darks/Flats/Bias)"),
     frame_info: str = Form(default="{}", description="JSON mit Frame-Metadaten"),
     mode: str = Form(default="wbpp", description="Processing-Modus: wbpp|fastbatch|shell_sim"),
-    calibration_dir: str = Form(default="", description="Pfad zu Flats/Darks/Bias auf dem Mac"),
+    calibration_dir: str = Form(default="", description="Legacy: Pfad zu Flats/Darks/Bias auf dem Mac"),
+    flats_dir: str = Form(default="", description="Pfad zu Flats auf dem Mac"),
+    darks_dir: str = Form(default="", description="Pfad zu Darks auf dem Mac"),
+    bias_dir: str = Form(default="", description="Pfad zu Bias auf dem Mac"),
     token: str = Form(default=""),
 ):
     """Nimmt ein ZIP mit RAW-Frames entgegen, entpackt es lokal und startet
@@ -547,7 +580,13 @@ async def process(
              counts["flat"], counts["bias"], counts["darkflat"])
 
     if calibration_dir:
-        log.info("  Calibration-Dir: %s", calibration_dir)
+        log.info("  Calibration-Dir (legacy): %s", calibration_dir)
+    if flats_dir:
+        log.info("  Flats-Dir:  %s", flats_dir)
+    if darks_dir:
+        log.info("  Darks-Dir:  %s", darks_dir)
+    if bias_dir:
+        log.info("  Bias-Dir:   %s", bias_dir)
 
     job = Job(
         id=job_id,
@@ -557,6 +596,9 @@ async def process(
         frame_info=info,
         mode=mode,
         calibration_dir=calibration_dir,
+        flats_dir=flats_dir,
+        darks_dir=darks_dir,
+        bias_dir=bias_dir,
     )
     _jobs[job_id] = job
 
@@ -577,6 +619,9 @@ async def process(
         "input_files": len(raw_files),
         "mode": mode,
         "calibration_dir": calibration_dir or None,
+        "flats_dir": flats_dir or None,
+        "darks_dir": darks_dir or None,
+        "bias_dir": bias_dir or None,
     }
 
 

@@ -22,7 +22,7 @@ interface PrecheckResult {
   }
   missing_archive_count: number
   estimated_size_mb: number
-  calibration_dir: { configured: boolean; path: string | null }
+  calibration_dir: { configured: boolean; flats_dir: string | null; darks_dir: string | null; bias_dir: string | null }
   agent: {
     available: boolean; pixinsight_found: boolean; shell_sim_available: boolean
     wbpp_script_found: boolean; fastbatch_script_found: boolean; active_jobs: number
@@ -349,18 +349,32 @@ export default function ResultsModal({
                       </div>
                     </div>
 
-                    {/* Calibration-Dir */}
+                    {/* Calibration-Directories */}
                     <div className="rounded-lg border border-white/10 bg-black/30 p-3">
                       <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-slate-300">
-                        <Files className="h-3.5 w-3.5" /> Calibration-Frames
+                        <Files className="h-3.5 w-3.5" /> Calibration-Frames (Mac-Pfade)
                       </div>
                       {precheck.calibration_dir.configured ? (
-                        <div className="text-[11px] text-emerald-300">
-                          ✓ Calibration-Verzeichnis: <span className="font-mono">{precheck.calibration_dir.path}</span>
+                        <div className="space-y-1">
+                          {precheck.calibration_dir.flats_dir && (
+                            <div className="text-[11px] text-emerald-300">
+                              ✓ Flats: <span className="font-mono">{precheck.calibration_dir.flats_dir}</span>
+                            </div>
+                          )}
+                          {precheck.calibration_dir.darks_dir && (
+                            <div className="text-[11px] text-emerald-300">
+                              ✓ Darks: <span className="font-mono">{precheck.calibration_dir.darks_dir}</span>
+                            </div>
+                          )}
+                          {precheck.calibration_dir.bias_dir && (
+                            <div className="text-[11px] text-emerald-300">
+                              ✓ Bias: <span className="font-mono">{precheck.calibration_dir.bias_dir}</span>
+                            </div>
+                          )}
                         </div>
                       ) : (
                         <div className="text-[11px] text-amber-300">
-                          ⚠ Kein Calibration-Verzeichnis für dieses Setup konfiguriert.
+                          ⚠ Keine Calibration-Verzeichnisse für dieses Setup konfiguriert.
                           Flats/Darks/Bias müssen im ZIP enthalten sein oder manuell geladen werden.
                         </div>
                       )}

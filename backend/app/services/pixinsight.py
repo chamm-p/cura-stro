@@ -89,6 +89,9 @@ class BackendJob:
     error: str | None = None
     input_files: int = 0
     calibration_dir: str = ""
+    flats_dir: str = ""
+    darks_dir: str = ""
+    bias_dir: str = ""
     frame_info: dict[str, Any] = field(default_factory=dict)
     created_at: str = ""
 
@@ -126,17 +129,31 @@ async def prepared_reldir(db: AsyncSession, user: User, obs: Observation) -> str
     )
 
 
-async def _get_calibration_dir(db: AsyncSession, obs: Observation) -> str:
-    """Liest das calibration_dir aus dem Setup (Teleskop+Kamera), falls
-    der Observation ein Teleskop zugeordnet ist."""
+async def _get_calibration_dirs(db: AsyncSession, obs: Observation) -> dict[str, str]:
+    """Liest die Kalibrierungs-Pfade aus dem Setup (Teleskop+Kamera).
+
+    Gibt ein Dict mit 'flats_dir', 'darks_dir', 'bias_dir' zurück.
+    Wenn nur das Legacy-Feld calibration_dir gesetzt ist, wird es für
+    alle drei verwendet (Fallback).
+    """
+    result = {"flats_dir": "", "darks_dir": "", "bias_dir": ""}
     if not obs.telescope_id:
-        return ""
+        return result
     setup = await db.scalar(
         select(Setup).where(Setup.telescope_id == obs.telescope_id)
     )
-    if setup and setup.calibration_dir:
-        return setup.calibration_dir
-    return ""
+    if not setup:
+        return result
+    result["flats_dir"] = setup.flats_dir or ""
+    result["darks_dir"] = setup.darks_dir or ""
+    result["bias_dir"] = setup.bias_dir or ""
+    # Legacy-Fallback: calibration_dir für alle drei verwenden, wenn die
+    # separaten Felder nicht gesetzt sind.
+    if setup.calibration_dir and not any(result.values()):
+        result["flats_dir"] = setup.calibration_dir
+        result["darks_dir"] = setup.calibration_dir
+        result["bias_dir"] = setup.calibration_dir
+    return result
 
 
 async def _frame_summary(db: AsyncSession, obs: Observation) -> dict[str, Any]:
@@ -281,7 +298,7 @@ async def _do_batch_transfer(
     obs_id: str,
     user_id: str,
     mode: str,
-    calibration_dir: str,
+    calib_dirs: dict[str, str],
     frame_info: dict[str, Any],
 ) -> None:
     """Hintergrund-Task: liest RAW-Dateien vom NAS, zippt sie und lädt sie
@@ -321,8 +338,11 @@ async def _do_batch_transfer(
         # ZIP an Mac-Agent hochladen (außerhalb der DB-Session)
         agent_url = await _agent_url("/process")
         logger.info(
-            "PixInsight [job=%s]: sende ZIP (%d bytes) an %s (mode=%s, calib=%s)",
-            job.id, len(zip_bytes), agent_url, mode, calibration_dir or "(keine)",
+            "PixInsight [job=%s]: sende ZIP (%d bytes) an %s (mode=%s, flats=%s, darks=%s, bias=%s)",
+            job.id, len(zip_bytes), agent_url, mode,
+            calib_dirs.get("flats_dir") or "(keine)",
+            calib_dirs.get("darks_dir") or "(keine)",
+            calib_dirs.get("bias_dir") or "(keine)",
         )
 
         form_data = {
@@ -330,8 +350,12 @@ async def _do_batch_transfer(
             "mode": mode,
             "token": await _agent_token(),
         }
-        if calibration_dir:
-            form_data["calibration_dir"] = calibration_dir
+        if calib_dirs.get("flats_dir"):
+            form_data["flats_dir"] = calib_dirs["flats_dir"]
+        if calib_dirs.get("darks_dir"):
+            form_data["darks_dir"] = calib_dirs["darks_dir"]
+        if calib_dirs.get("bias_dir"):
+            form_data["bias_dir"] = calib_dirs["bias_dir"]
 
         try:
             async with httpx.AsyncClient(timeout=600.0) as client:
@@ -404,13 +428,17 @@ async def trigger_batch(
         mode = "wbpp"
 
     # Calibration-Dir aus Setup holen
-    calibration_dir = await _get_calibration_dir(db, obs)
+    calib_dirs = await _get_calibration_dirs(db, obs)
 
     # Frame-Info sammeln
     frame_info = await _frame_summary(db, obs)
     logger.info(
-        "PixInsight: trigger_batch für obs=%s, mode=%s, calib_dir=%s, frame_info=%s",
-        obs.id, mode, calibration_dir or "(keine)", frame_info,
+        "PixInsight: trigger_batch für obs=%s, mode=%s, flats=%s, darks=%s, bias=%s, frame_info=%s",
+        obs.id, mode,
+        calib_dirs.get("flats_dir") or "(keine)",
+        calib_dirs.get("darks_dir") or "(keine)",
+        calib_dirs.get("bias_dir") or "(keine)",
+        frame_info,
     )
 
     # BackendJob erstellen
@@ -421,7 +449,10 @@ async def trigger_batch(
         user_id=str(user.id),
         status="starting",
         mode=mode,
-        calibration_dir=calibration_dir,
+        calibration_dir=calib_dirs.get("flats_dir", ""),
+        flats_dir=calib_dirs.get("flats_dir", ""),
+        darks_dir=calib_dirs.get("darks_dir", ""),
+        bias_dir=calib_dirs.get("bias_dir", ""),
         frame_info=frame_info,
         created_at=datetime.now(timezone.utc).isoformat(),
     )
@@ -429,7 +460,7 @@ async def trigger_batch(
 
     # Hintergrund-Task starten (nicht-blockierend)
     asyncio.create_task(_do_batch_transfer(
-        job, str(obs.id), str(user.id), mode, calibration_dir, frame_info,
+        job, str(obs.id), str(user.id), mode, calib_dirs, frame_info,
     ))
 
     # Observation-Status sofort auf "in_bearbeitung" setzen
@@ -443,7 +474,10 @@ async def trigger_batch(
         "mode": mode,
         "agent_url": _cfg.pixinsight_agent_url,
         "input_files": 0,  # wird im Hintergrund gefüllt
-        "calibration_dir": calibration_dir or None,
+        "calibration_dir": calib_dirs.get("flats_dir") or None,
+        "flats_dir": calib_dirs.get("flats_dir") or None,
+        "darks_dir": calib_dirs.get("darks_dir") or None,
+        "bias_dir": calib_dirs.get("bias_dir") or None,
         "frame_info": frame_info,
     }
 
@@ -688,7 +722,7 @@ async def precheck(
             })
 
     # 2. Calibration-Dir aus Setup
-    calibration_dir = await _get_calibration_dir(db, obs)
+    calib_dirs = await _get_calibration_dirs(db, obs)
     calib_info: dict[str, Any] = {
         "configured": bool(calibration_dir),
         "path": calibration_dir or None,

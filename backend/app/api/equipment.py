@@ -195,6 +195,9 @@ async def _setup_out(db: AsyncSession, s: Setup) -> SetupOut:
         focal_ratio=ratio,
         filters=[SetupFilterOut(id=str(f.id), name=f.name, kind=f.kind, bandwidth_nm=f.bandwidth_nm) for f in flt],
         calibration_dir=s.calibration_dir,
+        flats_dir=s.flats_dir,
+        darks_dir=s.darks_dir,
+        bias_dir=s.bias_dir,
     )
 
 
@@ -217,7 +220,16 @@ async def create_setup(
 ):
     scope = await _owned(db, Telescope, user, body.telescope_id)
     cam = await _owned(db, Camera, user, body.camera_id)
-    s = Setup(user_id=user.id, name=body.name, telescope_id=scope.id, camera_id=cam.id, calibration_dir=body.calibration_dir)
+    s = Setup(
+        user_id=user.id,
+        name=body.name,
+        telescope_id=scope.id,
+        camera_id=cam.id,
+        calibration_dir=body.calibration_dir,
+        flats_dir=body.flats_dir,
+        darks_dir=body.darks_dir,
+        bias_dir=body.bias_dir,
+    )
     db.add(s)
     await db.flush()
     await _set_setup_filters(db, user, s.id, body.filter_ids)
@@ -235,6 +247,12 @@ async def update_setup(
         await _set_setup_filters(db, user, s.id, body.filter_ids)
     if body.calibration_dir is not None:
         s.calibration_dir = body.calibration_dir or None
+    if body.flats_dir is not None:
+        s.flats_dir = body.flats_dir or None
+    if body.darks_dir is not None:
+        s.darks_dir = body.darks_dir or None
+    if body.bias_dir is not None:
+        s.bias_dir = body.bias_dir or None
     await db.flush()
     return await _setup_out(db, s)
 

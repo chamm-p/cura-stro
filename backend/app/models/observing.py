@@ -94,10 +94,15 @@ class Setup(Base):
     camera_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("cameras.id", ondelete="CASCADE"), nullable=False
     )
-    # Pfad auf dem Mac, wo Kalibrierungs-Frames (Flats/Darks/Bias) für dieses
-    # Setup liegen. Wird an den Mac-Agent durchgereicht, damit PixInsight/WBPP
-    # die Master-Frames automatisch findet.
+    # Legacy: einzelnes Calibration-Verzeichnis (Flats/Darks/Bias zusammen).
+    # Wird noch als Fallback unterstützt, aber die separaten Felder unten
+    # sind der bevorzugte Weg.
     calibration_dir: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Separate Pfade auf dem Mac für die jeweiligen Kalibrierungs-Frames.
+    # Jeder Pfad ist optional — nur was angegeben ist, wird genutzt.
+    flats_dir: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    darks_dir: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    bias_dir: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
