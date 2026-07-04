@@ -57,16 +57,16 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-
 # ─── Logging-Setup (Console + Datei) ───
 LOG_FORMAT = "%(asctime)s [%(levelname)-7s] %(message)s"
-logging.basicConfig(
-    level=logging.INFO,
-    format=LOG_FORMAT,
-    datefmt="%H:%M:%S",
-)
-log = logging.getLogger("cura-stro.agent")
 
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt="%H:%M:%S"))
+
+log = logging.getLogger("cura-stro.agent")
+log.setLevel(logging.INFO)
+log.addHandler(_console_handler)
+log.propagate = False  # Verhindert doppelte Ausgabe via uvicorn-Root-Handler
 # ─── Konfiguration (Umgebungsvariablen) ───
 AGENT_PORT = int(os.environ.get("AGENT_PORT", "7777"))
 AGENT_TOKEN = os.environ.get("AGENT_TOKEN", "")  # Shared-Secret mit Backend
