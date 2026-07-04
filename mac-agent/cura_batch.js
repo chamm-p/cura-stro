@@ -1,64 +1,36 @@
 /* cura_batch.js — PixInsight PJSR Batch-Skript (manuelle Vorverarbeitung)
  *
- * Wird headless vom Mac-Agent aufgerufen. Da PixInsight keine beliebigen
- * CLI-Argumente an Skripte weiterreicht, übergibt der Agent die Parameter
- * über eine JSON-Config-Datei. Der Wrapper setzt die globale Variable
- * CURA_CONFIG_PATH, dieses Skript liest sie aus.
+ * Wird headless vom Mac-Agent aufgerufen. Der Agent generiert einen Wrapper,
+ * der die Konfiguration als globale JS-Variablen setzt und dieses Skript
+ * inkludiert.  Kein JSON.parse / JSON.stringify — PJSR hat kein JSON-Objekt.
  *
- * Pipeline: ImageCalibration → StarAlignment → ImageIntegration
+ * Pipeline: ImageCalibration -> StarAlignment -> ImageIntegration
  * Alle Frames (Lights + Flats/Darks/Bias) liegen im Input-Verzeichnis
  * (vom Backend per SMB vom NAS geholt und ins ZIP gepackt).
  * Frame-Typ wird am Dateinamen-Präfix erkannt (Light_, Dark_, Flat_, Bias_).
  *
- * PJSR-API basiert auf Referenz-Implementierungen (astro-pipeline von
- * ClemDeepSky). Die korrekte Array-Form für targetFrames/images ist:
- *   ImageCalibration.targetFrames = [[true, path], ...]
- *   StarAlignment.targets         = [[true, true, path], ...]
- *   ImageIntegration.images       = [[true, true, path, ""], ...]
- * Properties nutzen Enum-Konstanten (Prototype-Werte), keine Strings.
+ * PJSR-Kompatibilität:
+ *   - Kein JSON.parse / JSON.stringify  (kein JSON-Objekt in PJSR)
+ *   - Kein String.startsWith()           (ES6, nicht in PJSR)
+ *   - Kein Array.map / Array.forEach      (nicht zuverlässig in PJSR)
+ *   - Kein #feature-id / #include         (nicht nötig für headless -r=)
  */
 
-#feature-id    cura-stro/batch
-#feature-label cura-stro Batch-Vorverarbeitung
-
-#include <pjsr/DataType.jsh>
-
-// ─── Parameter laden (Config-Datei oder argv) ───
+// ─── Parameter (globale Variablen vom Wrapper) ───
 var inputDir = "";
 var outputDir = "";
-var infoFile = "";
-var mode = "wbpp";
+var mode = "fastbatch";
+var frameInfo = {};
 
-if (typeof CURA_CONFIG_PATH !== "undefined" && CURA_CONFIG_PATH && !CURA_CONFIG_PATH.isEmpty()) {
-    console.writeln("Lade Konfiguration aus: " + CURA_CONFIG_PATH);
-    try {
-        var configText = File.readTextFile(CURA_CONFIG_PATH);
-        var config = JSON.parse(configText);
-        inputDir  = config.inputDir  || "";
-        outputDir = config.outputDir || "";
-        infoFile  = config.infoFile  || "";
-        mode      = config.mode      || "wbpp";
-    } catch (e) {
-        console.criticalln("Fehler beim Lesen der Config-Datei: " + e);
-        throw e;
-    }
-} else {
-    console.writeln("Keine Config-Datei — parse argv");
-    for (var i = 0; i < argc; ++i) {
-        var arg = argv[i];
-        if (arg.startsWith("--input="))
-            inputDir = arg.substring(8);
-        else if (arg.startsWith("--output="))
-            outputDir = arg.substring(9);
-        else if (arg.startsWith("--info="))
-            infoFile = arg.substring(7);
-        else if (arg.startsWith("--mode="))
-            mode = arg.substring(7);
-    }
+if (typeof CURA_INPUT_DIR !== "undefined") {
+    inputDir  = CURA_INPUT_DIR;
+    outputDir = CURA_OUTPUT_DIR;
+    mode      = CURA_MODE;
+    frameInfo = CURA_FRAME_INFO;
 }
 
-if (inputDir.isEmpty() || outputDir.isEmpty()) {
-    console.criticalln("cura_batch: --input und --output erforderlich");
+if (inputDir.length === 0 || outputDir.length === 0) {
+    console.criticalln("cura_batch: inputDir und outputDir erforderlich");
     throw new Error("Missing arguments");
 }
 
@@ -67,25 +39,16 @@ console.writeln("Input:  " + inputDir);
 console.writeln("Output: " + outputDir);
 console.writeln("Mode:   " + mode);
 
-// ─── Frame-Info laden (optional) ───
-var frameInfo = {};
-if (!infoFile.isEmpty() && File.exists(infoFile)) {
-    try {
-        frameInfo = JSON.parse(File.readTextFile(infoFile));
-        console.writeln("Frame-Info: " + JSON.stringify(frameInfo));
-    } catch (e) {
-        console.warningln("Konnte Frame-Info nicht laden: " + e);
-    }
-}
-
 // ─── Output-Verzeichnis sicherstellen ───
 if (!File.directoryExists(outputDir)) {
     File.createDirectory(outputDir, true);
 }
 
-// ─── Hilfsfunktionen ───
+// ─── Hilfsfunktionen (PJSR-kompatibel, keine ES6-Methoden) ───
+
 function listFiles(dir) {
     var files = [];
+    if (!File.directoryExists(dir)) return files;
     var ff = new FileFind;
     ff.begin(dir + "/*");
     while (ff.next()) {
@@ -99,12 +62,16 @@ function listFiles(dir) {
 
 function listFilesRecursive(dir) {
     var files = [];
+    if (!File.directoryExists(dir)) return files;
     var ff = new FileFind;
     ff.begin(dir + "/*");
     while (ff.next()) {
         if (ff.isDirectory) {
             if (ff.name !== "." && ff.name !== "..") {
-                files = files.concat(listFilesRecursive(dir + "/" + ff.name));
+                var sub = listFilesRecursive(dir + "/" + ff.name);
+                for (var j = 0; j < sub.length; ++j) {
+                    files.push(sub[j]);
+                }
             }
         } else {
             files.push(dir + "/" + ff.name);
@@ -114,30 +81,24 @@ function listFilesRecursive(dir) {
     return files;
 }
 
-function classifyFrame(filename) {
-    var base = File.extractName(filename);
-    var lower = base.toLowerCase();
-    if (lower.startsWith("darkflat"))
-        return "darkflat";
-    if (lower.startsWith("light"))
-        return "light";
-    if (lower.startsWith("dark"))
-        return "dark";
-    if (lower.startsWith("flat"))
-        return "flat";
-    if (lower.startsWith("bias"))
-        return "bias";
+function classifyFrame(filepath) {
+    // Dateinamen aus Pfad extrahieren (ohne PJSR-File.extractName-Abhängigkeit)
+    var name = filepath;
+    var slash = name.lastIndexOf('/');
+    if (slash >= 0) name = name.substring(slash + 1);
+    var lower = name.toLowerCase();
+    if (lower.indexOf("darkflat") === 0) return "darkflat";
+    if (lower.indexOf("light") === 0) return "light";
+    if (lower.indexOf("dark") === 0) return "dark";
+    if (lower.indexOf("flat") === 0) return "flat";
+    if (lower.indexOf("bias") === 0) return "bias";
     return "light";
 }
 
-function isImageFile(filename) {
-    var ext = File.extractExtension(filename).toLowerCase();
+function isImageFile(filepath) {
+    var ext = File.extractExtension(filepath).toLowerCase();
     return ext === "fit" || ext === "fits" || ext === "fts" ||
            ext === "xisf" || ext === "tif" || ext === "tiff";
-}
-
-function basename(path) {
-    return File.extractName(path) + "." + File.extractExtension(path);
 }
 
 // ─── Alle Dateien sammeln ───
@@ -148,14 +109,12 @@ var lights = [], darks = [], flats = [], biases = [], darkflats = [];
 for (var i = 0; i < allFiles.length; ++i) {
     if (!isImageFile(allFiles[i])) continue;
     var type = classifyFrame(allFiles[i]);
-    switch (type) {
-        case "light":     lights.push(allFiles[i]); break;
-        case "dark":      darks.push(allFiles[i]); break;
-        case "flat":      flats.push(allFiles[i]); break;
-        case "bias":      biases.push(allFiles[i]); break;
-        case "darkflat":  darkflats.push(darkflats[i]); break;
-        default:          lights.push(allFiles[i]); break;
-    }
+    if (type === "light")        lights.push(allFiles[i]);
+    else if (type === "dark")    darks.push(allFiles[i]);
+    else if (type === "flat")    flats.push(allFiles[i]);
+    else if (type === "bias")    biases.push(allFiles[i]);
+    else if (type === "darkflat") darkflats.push(allFiles[i]);
+    else                          lights.push(allFiles[i]);
 }
 
 console.writeln("Gefunden: " + lights.length + " Lights, " +
@@ -181,10 +140,12 @@ var masterBias = null, masterDark = null, masterFlat = null;
 function buildMaster(frames, label, outPath, normalize) {
     if (frames.length === 0) return null;
     console.writeln("Erstelle " + label + "-Master aus " + frames.length + " Frames...");
+
     var images = [];
     for (var i = 0; i < frames.length; ++i) {
         images.push([true, true, frames[i], ""]);
     }
+
     var ii = new ImageIntegration();
     ii.images = images;
     ii.combination = ImageIntegration.prototype.Average;
@@ -203,7 +164,10 @@ function buildMaster(frames, label, outPath, normalize) {
 
     // Snapshot der Fenster vor der Integration
     var idsBefore = {};
-    ImageWindow.windows.forEach(function(w) { idsBefore[w.mainView.id] = true; });
+    var winsBefore = ImageWindow.windows;
+    for (var i = 0; i < winsBefore.length; ++i) {
+        idsBefore[winsBefore[i].mainView.id] = true;
+    }
 
     ii.executeGlobal();
     processEvents();
@@ -211,30 +175,32 @@ function buildMaster(frames, label, outPath, normalize) {
 
     // Neue Fenster finden
     var newWins = [];
-    ImageWindow.windows.forEach(function(w) {
-        if (!idsBefore[w.mainView.id]) newWins.push(w);
-    });
+    var winsAfter = ImageWindow.windows;
+    for (var i = 0; i < winsAfter.length; ++i) {
+        if (!idsBefore[winsAfter[i].mainView.id]) {
+            newWins.push(winsAfter[i]);
+        }
+    }
 
     if (newWins.length === 0) {
-        console.warningln("  WARNUNG: Kein Ergebnis-Window für " + label);
+        console.warningln("  WARNUNG: Kein Ergebnis-Window fuer " + label);
         return null;
     }
 
-    // Integration-Window ist das erste neue Fenster
     var intWin = newWins[0];
     var ok = intWin.saveAs(outPath, false, true, false, false);
     intWin.forceClose();
 
-    // Alle verbleibenden neuen Fenster schließen
-    newWins.forEach(function(w) {
-        if (w.mainView.id !== intWin.mainView.id) w.forceClose();
-    });
+    // Alle verbleibenden neuen Fenster schliessen
+    for (var i = 1; i < newWins.length; ++i) {
+        newWins[i].forceClose();
+    }
 
     if (ok) {
         console.writeln("  " + label + "-Master gespeichert: " + outPath);
         return outPath;
     } else {
-        console.warningln("  WARNUNG: saveAs fehlgeschlagen für " + label);
+        console.warningln("  WARNUNG: saveAs fehlgeschlagen fuer " + label);
         return null;
     }
 }
@@ -247,7 +213,11 @@ masterFlat = buildMaster(flats, "Flat", calDir + "/master_flat.xisf", true);
 console.writeln("\n--- ImageCalibration ---");
 
 var ic = new ImageCalibration();
-ic.targetFrames = lights.map(function(f) { return [true, f]; });
+var icTargets = [];
+for (var i = 0; i < lights.length; ++i) {
+    icTargets.push([true, lights[i]]);
+}
+ic.targetFrames = icTargets;
 ic.outputDirectory = calDir;
 ic.outputExtension = ".xisf";
 ic.outputPostfix = "_c";
@@ -345,12 +315,11 @@ if (alignedLights.length === 0) {
     throw new Error("StarAlignment failed");
 }
 
-// ─── 4. ImageIntegration ───
+// ─── 4. ImageIntegration (Stack) ───
 console.writeln("\n--- ImageIntegration ---");
 
-var masterName = "master_" +
-    (frameInfo.object_name || "result") + "_" +
-    (frameInfo.filter_name || "L") + ".xisf";
+var objName = frameInfo.object_name || "result";
+var masterName = "master_" + objName + ".xisf";
 var masterPath = outputDir + "/" + masterName;
 
 var iiImages = [];
@@ -374,7 +343,10 @@ ii.generateRejectionMaps = false;
 
 // Snapshot der Fenster vor der Integration
 var idsBeforeII = {};
-ImageWindow.windows.forEach(function(w) { idsBeforeII[w.mainView.id] = true; });
+var winsBeforeII = ImageWindow.windows;
+for (var i = 0; i < winsBeforeII.length; ++i) {
+    idsBeforeII[winsBeforeII[i].mainView.id] = true;
+}
 
 ii.executeGlobal();
 processEvents();
@@ -382,29 +354,30 @@ gc();
 
 // Neue Fenster finden
 var newWinsII = [];
-ImageWindow.windows.forEach(function(w) {
-    if (!idsBeforeII[w.mainView.id]) newWinsII.push(w);
-});
+var winsAfterII = ImageWindow.windows;
+for (var i = 0; i < winsAfterII.length; ++i) {
+    if (!idsBeforeII[winsAfterII[i].mainView.id]) {
+        newWinsII.push(winsAfterII[i]);
+    }
+}
 
 if (newWinsII.length === 0) {
     console.criticalln("ImageIntegration lieferte kein Ergebnis-Window");
     throw new Error("ImageIntegration failed");
 }
 
-// Integration-Window ist das erste neue Fenster
 var intWin = newWinsII[0];
 var okSave = intWin.saveAs(masterPath, false, true, false, false);
 intWin.forceClose();
 
-// Alle verbleibenden neuen Fenster schließen
-newWinsII.forEach(function(w) {
-    if (w.mainView.id !== intWin.mainView.id) w.forceClose();
-});
+for (var i = 1; i < newWinsII.length; ++i) {
+    newWinsII[i].forceClose();
+}
 
 if (okSave) {
     console.writeln("Master gespeichert: " + masterPath);
 } else {
-    console.criticalln("saveAs fehlgeschlagen für Master");
+    console.criticalln("saveAs fehlgeschlagen fuer Master");
     throw new Error("saveAs failed");
 }
 
@@ -412,4 +385,3 @@ if (okSave) {
 console.writeln("\n=== Batch abgeschlossen ===");
 console.writeln("Output-Verzeichnis: " + outputDir);
 console.writeln("Master: " + masterPath);
-console.writeln("Ergebnisse können nun in PixInsight manuell weiterentwickelt werden.");

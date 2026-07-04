@@ -51,10 +51,16 @@ _console_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt="%H:%M:%S"))
 
 log = logging.getLogger("cura-stro.agent")
 log.setLevel(logging.INFO)
+log.handlers = []  # Alle existierenden Handler entfernen (verhindert Doppelung)
 log.addHandler(_console_handler)
 log.propagate = False  # Verhindert doppelte Ausgabe via uvicorn-Root-Handler
 
-# Uvicorn-Access-Log reduzieren (nur Warnungen/Fehler)
+# Uvicorn-Logger an unseren Handler anbinden (kein eigener Handler → keine Doppelung)
+for _uv_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+    _uv_log = logging.getLogger(_uv_name)
+    _uv_log.handlers = []
+    _uv_log.addHandler(_console_handler)
+    _uv_log.propagate = False
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 # ─── Konfiguration (Umgebungsvariablen) ───
@@ -75,7 +81,7 @@ MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "1"))
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="cura-stro Mac-Agent", version="0.5.0")
+app = FastAPI(title="cura-stro Mac-Agent", version="0.6.0")
 
 
 # ─── Job-Tracking ───
@@ -273,6 +279,26 @@ async def _run_shell_sim(job: Job) -> None:
             log.info("=" * 60)
 
 
+def _print_pi_log(log_file: Path, max_lines: int = 200) -> None:
+    """Gibt den PixInsight-Log auf der Agent-Konsole aus (für Debugging)."""
+    try:
+        content = log_file.read_text(errors="replace").strip()
+        if not content:
+            log.info("  PixInsight-Log ist leer")
+            return
+        lines = content.split("\n")
+        if len(lines) > max_lines:
+            log.info("  --- PixInsight Log (letzte %d von %d Zeilen) ---", max_lines, len(lines))
+            lines = lines[-max_lines:]
+        else:
+            log.info("  --- PixInsight Log (%d Zeilen) ---", len(lines))
+        for line in lines:
+            log.info("  PI | %s", line)
+        log.info("  --- Ende PixInsight Log ---")
+    except Exception as e:
+        log.warning("  Konnte PixInsight-Log nicht lesen: %s", e)
+
+
 async def _run_pixinsight(job: Job) -> None:
     """Führt PixInsight headless mit dem Batch-Skript aus."""
     async with _semaphore:
@@ -290,32 +316,23 @@ async def _run_pixinsight(job: Job) -> None:
         log_file = LOG_DIR / f"{job.id}.log"
         job.log_file = str(log_file)
 
-        # Frame-Info als JSON-Datei für das Skript
-        info_file = Path(job.work_input).parent / f"{job.id}_info.json"
-        info_file.write_text(json.dumps(job.frame_info, indent=2))
-
         batch_script = BATCH_SCRIPT
 
-        # Config-JSON für das Skript schreiben.
-        config_path = Path(job.work_input).parent / f"{job.id}_config.json"
-        config = {
-            "inputDir":  job.work_input,
-            "outputDir": job.work_output,
-            "infoFile":  str(info_file),
-            "mode":      job.mode,
-        }
-        config_path.write_text(json.dumps(config, indent=2))
-        log.info("  Config: %s", config_path)
-
-        # Wrapper-JS generieren: setzt CURA_CONFIG_PATH und inkludiert cura_batch.js.
+        # Wrapper-JS generieren: setzt Config als globale JS-Variablen und
+        # inkludiert cura_batch.js.  KEIN JSON.parse im PJSR-Skript nötig —
+        # PJSR hat kein JSON-Objekt.  Stattdessen werden die Werte direkt
+        # als JavaScript-Variablen injiziert.
         wrapper_path = Path(job.work_input).parent / f"{job.id}_wrapper.js"
         batch_source = Path(batch_script).read_text()
         wrapper_js = (
-            "var CURA_CONFIG_PATH = " + json.dumps(str(config_path)) + ";\n"
+            "var CURA_INPUT_DIR = " + json.dumps(job.work_input) + ";\n"
+            + "var CURA_OUTPUT_DIR = " + json.dumps(job.work_output) + ";\n"
+            + "var CURA_MODE = " + json.dumps(job.mode) + ";\n"
+            + "var CURA_FRAME_INFO = " + json.dumps(job.frame_info) + ";\n"
             + batch_source
         )
         wrapper_path.write_text(wrapper_js)
-        log.info("  Wrapper: %s (cura_batch.js inlined)", wrapper_path)
+        log.info("  Wrapper: %s (cura_batch.js inlined, Config als JS-Variablen)", wrapper_path)
 
         # PixInsight CLI Aufruf: nur -r=<wrapper> --force-exit
         cmd = [
@@ -338,9 +355,10 @@ async def _run_pixinsight(job: Job) -> None:
             rc = await proc.wait()
             job.return_code = rc
 
+            # PixInsight-Log auf Agent-Konsole ausgeben (für Debugging)
+            _print_pi_log(log_file)
+
             if rc == 0:
-                job.status = "completed"
-                log.info("Job %s — PixInsight ABGESCHLOSSEN (exit 0)", job.id[:8])
                 out_path = Path(job.work_output)
                 if out_path.is_dir():
                     job.result_files = sorted(
@@ -351,15 +369,20 @@ async def _run_pixinsight(job: Job) -> None:
                         }
                     )
                 log.info("  Ergebnis: %d Dateien", len(job.result_files))
-                zip_path = Path(job.work_output).parent / f"{job.id}_results.zip"
-                if out_path.is_dir() and any(out_path.iterdir()):
+
+                if job.result_files:
+                    job.status = "completed"
+                    log.info("Job %s — PixInsight ABGESCHLOSSEN (exit 0, %d Dateien)",
+                             job.id[:8], len(job.result_files))
+                    zip_path = Path(job.work_output).parent / f"{job.id}_results.zip"
                     log.info("  Packe Ergebnis-ZIP …")
                     job.result_zip_size = _zip_directory(out_path, zip_path)
                     job.result_zip = str(zip_path)
                 else:
                     job.status = "failed"
                     job.error = "PixInsight lieferte keine Ergebnis-Dateien"
-                    log.error("Job %s — FEHLER: keine Ergebnis-Dateien", job.id[:8])
+                    log.error("Job %s — FEHLER: keine Ergebnis-Dateien (exit 0, aber Output leer)",
+                              job.id[:8])
             else:
                 job.status = "failed"
                 job.error = f"PixInsight exit code {rc} — siehe Log: {log_file}"
@@ -376,8 +399,6 @@ async def _run_pixinsight(job: Job) -> None:
             log.error("Job %s — FEHLER: %s", job.id[:8], e, exc_info=True)
         finally:
             job.completed_at = _now_iso()
-            info_file.unlink(missing_ok=True)
-            config_path.unlink(missing_ok=True)
             wrapper_path.unlink(missing_ok=True)
             log.info("=" * 60)
 
@@ -386,7 +407,7 @@ async def _run_pixinsight(job: Job) -> None:
 @app.on_event("startup")
 async def _startup():
     log.info("=" * 60)
-    log.info("cura-stro Mac-Agent v0.5.0 — startet")
+    log.info("cura-stro Mac-Agent v0.6.0 — startet")
     log.info("  Port:         %d", AGENT_PORT)
     log.info("  Work-Dir:     %s", WORK_DIR)
     log.info("  Log-Dir:      %s", LOG_DIR)
@@ -586,4 +607,6 @@ async def job_logs(job_id: str, token: str = ""):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=AGENT_PORT)
+    # log_config=None: uvicorn rekonfiguriert Logging NICHT — unsere Handler
+    # bleiben erhalten, keine Doppelung.
+    uvicorn.run(app, host="0.0.0.0", port=AGENT_PORT, log_config=None)
