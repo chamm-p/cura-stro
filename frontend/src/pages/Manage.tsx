@@ -176,6 +176,8 @@ export default function Manage() {
   // Mehrfachauswahl für Stapel-Verarbeitung
   const [selIds, setSelIds] = useState<Set<string>>(new Set())
   const [batchOpen, setBatchOpen] = useState(false)
+  const [reconciling, setReconciling] = useState(false)
+  const [reconcileMsg, setReconcileMsg] = useState('')
   const [sortField, setSortField] = useState<string | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
@@ -224,6 +226,16 @@ export default function Manage() {
     load()
   }
   const del = async (id: string) => { await api.delete(`/api/observations/${id}`); load() }
+  const reconcile = async () => {
+    setReconciling(true); setReconcileMsg('')
+    try {
+      await api.post('/api/pixinsight/reconcile')
+      setReconcileMsg('Agents geprüft — fertige Ergebnisse wurden abgeholt (siehe „Ergebnis"-Spalte).')
+      load()
+    } catch (e: any) {
+      setReconcileMsg(e.response?.data?.detail || 'Abholen fehlgeschlagen.')
+    } finally { setReconciling(false) }
+  }
   const addManual = async () => {
     if (!newLabel.trim()) return
     await api.post('/api/observations', { target_label: newLabel.trim(), status: 'geplant' })
@@ -269,7 +281,13 @@ export default function Manage() {
         <button onClick={() => setFileImportOpen(true)} className="flex items-center gap-1.5 rounded-lg border border-white/10 px-3.5 py-2 text-sm text-slate-200 hover:bg-white/10" title="FIT-Dateien per Drag & Drop importieren (…/<Objekt>/<Gerät>/*.fit)">
           <UploadCloud className="h-4 w-4" /> Dateien
         </button>
+        <button onClick={reconcile} disabled={reconciling}
+          className="flex items-center gap-1.5 rounded-lg border border-white/10 px-3.5 py-2 text-sm text-slate-200 hover:bg-white/10 disabled:opacity-50"
+          title="Fertige PixInsight-Ergebnisse vom Agent abholen (falls ein Job nach Neustart hängen blieb)">
+          {reconciling ? <Loader2 className="h-4 w-4 animate-spin" /> : <Cpu className="h-4 w-4" />} Ergebnisse abholen
+        </button>
       </div>
+      {reconcileMsg && <div className="mt-2 text-xs text-slate-400">{reconcileMsg}</div>}
 
       {loading ? (
         <div className="mt-10 flex justify-center"><Loader2 className="h-6 w-6 animate-spin text-slate-400" /></div>

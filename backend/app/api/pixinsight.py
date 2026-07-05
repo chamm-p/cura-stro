@@ -149,6 +149,13 @@ async def list_jobs(user: User = Depends(get_current_user)):
     return {"jobs": jobs}
 
 
+@router.post("/api/pixinsight/reconcile")
+async def reconcile(user: User = Depends(get_current_user)):
+    """Holt verwaiste, fertige Ergebnisse von den Agents ab (Selbstheilung
+    nach Backend-Neustart) und ordnet sie den Aufnahmen zu."""
+    return await pixinsight.reconcile_now()
+
+
 @router.post("/api/pixinsight/jobs/{job_id}/cancel")
 async def cancel_job(job_id: str, user: User = Depends(get_current_user)):
     """Bricht einen laufenden Job hart ab (Übertragung stoppen bzw.

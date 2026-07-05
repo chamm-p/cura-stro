@@ -743,6 +743,8 @@ async def _do_batch_transfer(
         form_data = {
             "frame_info": json.dumps(frame_info),
             "mode": mode,
+            "obs_id": obs_id,
+            "user_id": user_id,
             "token": await _agent_token(),
         }
         if calib_json:
@@ -984,6 +986,102 @@ async def _finalize_job(bjob: BackendJob) -> dict[str, Any]:
         return bjob.result
 
 
+# Verwaiste Agent-Jobs (Backend-Neustart / Transfer-Timeout) einsammeln:
+_orphan_locks: dict[str, asyncio.Lock] = {}
+# Agent-Job-IDs, die schon (fehlgeschlagen) reconciled wurden — nicht endlos
+# erneut versuchen.
+_orphans_seen: set[str] = set()
+
+
+async def _finalize_orphan(agent_base: str, agent_job_id: str, obs_id: str, user_id: str) -> bool:
+    """Holt ein verwaistes, fertiges Ergebnis vom Agent ab und ordnet es über
+    die mitgeschickte obs_id wieder zu — ohne dass ein BackendJob existiert
+    (der ging z. B. beim Backend-Neustart verloren). Idempotent: nach Erfolg
+    wird der Agent-Job gelöscht, taucht also nicht wieder auf."""
+    lock = _orphan_locks.setdefault(agent_job_id, asyncio.Lock())
+    async with lock:
+        token = await _agent_token()
+        try:
+            async with httpx.AsyncClient(timeout=600.0) as client:
+                resp = await client.get(
+                    await _agent_url(f"/results/{agent_job_id}", agent_base),
+                    params={"token": token},
+                )
+                if resp.status_code in (404, 409):
+                    return False  # nichts (mehr) abzuholen
+                resp.raise_for_status()
+                zip_bytes = resp.content
+        except Exception as e:  # noqa: BLE001
+            logger.warning("PixInsight-Reconcile: Download %s fehlgeschlagen: %s", agent_job_id[:8], e)
+            return False
+
+        async with async_session() as db:
+            try:
+                obs = await db.get(Observation, uuid.UUID(obs_id))
+                user = await db.get(User, uuid.UUID(user_id))
+            except (ValueError, Exception):  # noqa: BLE001
+                obs = user = None
+            if not obs or not user:
+                logger.warning("PixInsight-Reconcile: Observation/User für Job %s nicht gefunden", agent_job_id[:8])
+                return False
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp_path = Path(tmpdir)
+                extracted = await _extract_zip(zip_bytes, tmp_path)
+                if not extracted:
+                    return False
+                # Bias/Dark/Flat-Master gehören nicht in den Objekt-Ordner —
+                # entfernen (im Cached-Calib-Fall sowieso keine dabei).
+                for name in list(CALIB_MASTER_NAMES):
+                    (tmp_path / name).unlink(missing_ok=True)
+                dev_rel = await results_svc.developer_reldir(db, user, obs)
+                written = await _write_results_to_storage(user, dev_rel, tmp_path)
+                registered = await _register_results(db, user, obs, dev_rel, tmp_path)
+
+            if obs.status in ("raw", "in_bearbeitung"):
+                obs.status = "vorbereitet"
+            obs.is_new = False
+            await db.commit()
+
+        logger.info("PixInsight-Reconcile: verwaisten Job %s zugeordnet — %d Datei(en) → %s (%d registriert)",
+                    agent_job_id[:8], len(written), dev_rel, registered)
+        await _cleanup_agent_job(agent_job_id, agent_base)
+        return True
+
+
+async def _reconcile_agents() -> None:
+    """Fragt jeden Agent nach fertigen, noch nicht abgeholten Jobs und holt
+    verwaiste Ergebnisse ein. Selbstheilung nach Backend-Neustart/Timeout."""
+    active_agent_ids = {
+        b.agent_job_id for b in _backend_jobs.values()
+        if b.agent_job_id and b.status in ("sent", "running")
+    }
+    for a in list_agents():
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                r = await client.get(await _agent_url("/jobs", a["url"]),
+                                     params={"token": await _agent_token()})
+                r.raise_for_status()
+                agent_jobs = r.json().get("jobs", [])
+        except Exception:
+            continue
+        for aj in agent_jobs:
+            ajid = aj.get("id")
+            if (aj.get("status") != "completed" or aj.get("output_cleaned")
+                    or not ajid or ajid in active_agent_ids or ajid in _orphans_seen):
+                continue
+            obs_id, user_id = aj.get("obs_id"), aj.get("user_id")
+            if not obs_id or not user_id:
+                continue  # alter Agent ohne obs_id — nicht zuordenbar
+            try:
+                ok = await _finalize_orphan(a["url"], ajid, obs_id, user_id)
+                if not ok:
+                    _orphans_seen.add(ajid)  # nicht endlos wiederholen
+            except Exception:
+                logger.exception("PixInsight-Reconcile: Job %s fehlgeschlagen", str(ajid)[:8])
+                _orphans_seen.add(ajid)
+
+
 async def poll_job_results(
     db: AsyncSession, user: User, obs: Observation, job_id: str
 ) -> dict[str, Any]:
@@ -1131,9 +1229,20 @@ async def agent_poll_loop():
                                 await db.commit()
                     except Exception:
                         pass
+            # Selbstheilung: verwaiste fertige Jobs auf den Agents einsammeln
+            # (Backend-Neustart / Transfer-Timeout → BackendJob verloren).
+            await _reconcile_agents()
         except Exception:
             logger.exception("PixInsight-Queue-Lauf fehlgeschlagen")
         await asyncio.sleep(20)
+
+
+async def reconcile_now() -> dict[str, Any]:
+    """Manueller Anstoß der Selbstheilung (Button im UI) — sammelt verwaiste
+    fertige Ergebnisse sofort ein statt auf den nächsten Queue-Lauf zu warten."""
+    before = len(_orphans_seen)
+    await _reconcile_agents()
+    return {"ok": True, "checked": True, "new_failures": len(_orphans_seen) - before}
 
 
 def list_backend_jobs() -> list[dict[str, Any]]:

@@ -166,6 +166,11 @@ class Job:
     result_zip: str        # Pfad zur Ergebnis-ZIP (wenn completed)
     frame_info: dict[str, Any]
     mode: str = "wbpp"     # wbpp · fastbatch · shell_sim
+    # Zuordnung zur Backend-Aufnahme — damit ein verwaistes Ergebnis (Backend
+    # neu gestartet) automatisch wieder der richtigen Observation zugeordnet
+    # werden kann.
+    obs_id: str = ""
+    user_id: str = ""
     status: str = "queued"  # queued · running · completed · failed
     started_at: str | None = None
     completed_at: str | None = None
@@ -931,6 +936,8 @@ async def process(
     frame_info: str = Form(default="{}", description="JSON mit Frame-Metadaten"),
     mode: str = Form(default="wbpp", description="Processing-Modus: wbpp|fastbatch|shell_sim"),
     calib: str = Form(default="", description="JSON: Calib-Referenzen (SHA-256 im Cache)"),
+    obs_id: str = Form(default=""),
+    user_id: str = Form(default=""),
     token: str = Form(default=""),
 ):
     """Nimmt ein ZIP mit RAW-Frames entgegen, entpackt es lokal und startet
@@ -1027,6 +1034,8 @@ async def process(
         result_zip="",
         frame_info=info,
         mode=mode,
+        obs_id=obs_id,
+        user_id=user_id,
         calib_paths=calib_paths,
     )
     _jobs[job_id] = job
