@@ -236,6 +236,9 @@ async def _upsert_observation(db: AsyncSession, user: User, cat: CatalogObject |
     else:
         q = q.where(Observation.target_label == label, Observation.catalog_object_id.is_(None))
     q = q.where(Observation.telescope_id == telescope_id if telescope_id else Observation.telescope_id.is_(None))
+    # Bei mehreren Einträgen (Option „neuer Verwaltungseintrag") wird der
+    # NEUESTE ergänzt — nicht ein zufälliger.
+    q = q.order_by(Observation.created_at.desc())
     obs = await db.scalar(q)
     if not obs:
         obs = Observation(

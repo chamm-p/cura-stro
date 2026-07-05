@@ -26,7 +26,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.asiair import _catalog_map, _upsert_observation
+from app.api.asiair import _catalog_map
 from app.api.deps import get_current_user
 from app.database import get_db
 from app.models.observation import Observation
@@ -62,6 +62,49 @@ async def _telescope_by_name(db: AsyncSession, user: User, name: str) -> Telesco
         if (t.name or "").strip().lower() == name.strip().lower():
             return t
     return None
+
+
+async def _matching_observations(
+    db: AsyncSession, user: User, cat, label: str, telescope_id
+) -> list[Observation]:
+    """Alle Aufnahmen zu (Objekt, Teleskop), neueste zuerst. Mehrere sind
+    legitim (Option „neuer Verwaltungseintrag" — z. B. Nacht 1 und Nacht 2
+    getrennt entwickeln)."""
+    q = select(Observation).where(Observation.user_id == user.id)
+    if cat:
+        q = q.where(Observation.catalog_object_id == cat.id)
+    else:
+        q = q.where(Observation.target_label == label, Observation.catalog_object_id.is_(None))
+    q = q.where(Observation.telescope_id == telescope_id if telescope_id else Observation.telescope_id.is_(None))
+    q = q.order_by(Observation.created_at.desc())
+    return list(await db.scalars(q))
+
+
+async def _known_filenames(db: AsyncSession, obss: list[Observation]) -> set[str]:
+    """Registrierte Dateinamen über ALLE übergebenen Aufnahmen — ein Sub darf
+    nie in zwei Einträgen landen (Löschen würde sonst fremde Dateien treffen)."""
+    known: set[str] = set()
+    for obs in obss:
+        rows = await db.scalars(
+            select(SubFrame.original_filename).where(SubFrame.observation_id == obs.id)
+        )
+        known.update(rows)
+    return known
+
+
+async def _create_observation(
+    db: AsyncSession, user: User, cat, label: str, telescope_id
+) -> Observation:
+    """Legt IMMER eine neue Aufnahme an (kein Upsert) — für die Option
+    „komplett neuer Verwaltungseintrag"."""
+    obs = Observation(
+        user_id=user.id, catalog_object_id=cat.id if cat else None,
+        target_label=None if cat else label, status="geplant",
+        telescope_id=telescope_id, is_new=True,
+    )
+    db.add(obs)
+    await db.flush()
+    return obs
 
 
 class PreviewBody(BaseModel):
@@ -113,6 +156,12 @@ async def preview(
             warnings.append(f"„{dev}“ ist nicht als Teleskop angelegt — Ablage unter „Unbekannt“.")
         if g["unparsed"]:
             warnings.append(f"{g['unparsed']} Datei(en) ohne ASIAir-Namensschema (werden als Light ohne Metadaten importiert).")
+        # Existiert schon ein Verwaltungseintrag? (→ UI: „ergänzen" vs.
+        # Häkchen „als neuen Eintrag importieren")
+        obss = await _matching_observations(
+            db, user, match, match.ident if match else obj, scope.id if scope else None
+        ) if obj else []
+        existing_subs = len(await _known_filenames(db, obss)) if obss else 0
         out.append({
             "object": obj, "device": dev, "files": g["files"],
             "matched_ident": match.ident if match else None,
@@ -120,13 +169,46 @@ async def preview(
             "matched_telescope": scope.name if scope else None,
             "filters": [{"filter": k, "subs": v} for k, v in sorted(g["filters"].items())],
             "nights": len(g["nights"]),
+            "entry_exists": len(obss) > 0,
+            "entry_count": len(obss),
+            "existing_subs": existing_subs,
             "warnings": warnings,
         })
     return {"groups": out, "skipped": skipped}
 
 
+class NewObservationBody(BaseModel):
+    object_name: str
+    device_name: str = ""
+
+
+@router.post("/observation")
+async def create_observation(
+    body: NewObservationBody,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Legt explizit einen NEUEN Verwaltungseintrag an (auch wenn zu
+    Objekt+Gerät schon einer existiert) — z. B. um Nacht 2 komplett
+    eigenständig zu entwickeln. Die folgenden /file-Uploads referenzieren
+    ihn per observation_id."""
+    obj_label = body.object_name.strip()
+    if not obj_label:
+        raise HTTPException(400, "object_name fehlt")
+    cat = (await _catalog_map(db)).get(asi.normalize_object(obj_label))
+    scope = await _telescope_by_name(db, user, body.device_name)
+    obs = await _create_observation(
+        db, user, cat, cat.ident if cat else obj_label, scope.id if scope else None
+    )
+    await db.commit()
+    return {"observation_id": str(obs.id)}
+
+
 class ScanBody(BaseModel):
     dry_run: bool = True
+    # Gruppen-Schlüssel "Objekt|Gerät", die als KOMPLETT NEUER Eintrag
+    # registriert werden sollen (statt den bestehenden zu ergänzen).
+    new_entries: list[str] = []
 
 
 @router.post("/scan")
@@ -145,6 +227,7 @@ async def scan_archive(
     cat = await _catalog_map(db)
     scopes = list(await db.scalars(select(Telescope).where(Telescope.user_id == user.id)))
     scope_by_lower = {(t.name or "").strip().lower(): t for t in scopes}
+    force_new = set(body.new_entries)
 
     try:
         objects = await asyncio.to_thread(storage.listsubdirs, raw_folder)
@@ -169,34 +252,35 @@ async def scan_archive(
             if not scope:
                 warnings.append(f"„{dev}“ ist nicht als Teleskop angelegt.")
 
-            # Bestehende Aufnahme suchen (ohne anzulegen), um 'neu' zu zählen.
-            q = select(Observation).where(Observation.user_id == user.id)
-            if match:
-                q = q.where(Observation.catalog_object_id == match.id)
-            else:
-                q = q.where(Observation.target_label == obj, Observation.catalog_object_id.is_(None))
-            q = q.where(Observation.telescope_id == scope.id if scope else Observation.telescope_id.is_(None))
-            obs = await db.scalar(q)
-            existing = set()
-            if obs:
-                existing = set(await db.scalars(
-                    select(SubFrame.original_filename).where(SubFrame.observation_id == obs.id)
-                ))
+            # Bestehende Aufnahmen (können MEHRERE sein — Option „neuer
+            # Eintrag"); 'neu' = in KEINEM davon registriert. Das verhindert,
+            # dass ein Sub in zwei Einträgen landet.
+            obss = await _matching_observations(
+                db, user, match, match.ident if match else obj,
+                scope.id if scope else None,
+            )
+            existing = await _known_filenames(db, obss)
             new_names = [n for n in names if PurePosixPath(n.replace("\\", "/")).name not in existing]
 
             registered = 0
             if not body.dry_run and new_names:
-                obs = obs or await _upsert_observation(
-                    db, user, match, match.ident if match else obj,
-                    scope.id if scope else None,
-                )
-                r = await archive.register_files(db, user, obs, rel_dir, new_names, source="nas")
+                key = f"{obj}|{dev}"
+                if key in force_new or not obss:
+                    target = await _create_observation(
+                        db, user, match, match.ident if match else obj,
+                        scope.id if scope else None,
+                    )
+                else:
+                    target = obss[0]  # neuester Eintrag wird ergänzt
+                r = await archive.register_files(db, user, target, rel_dir, new_names, source="nas")
                 registered = r["added"]
                 total_new += registered
 
             groups.append({
                 "object": obj, "device": dev, "files": len(names),
                 "new": len(new_names), "registered": registered,
+                "entry_exists": len(obss) > 0,
+                "entry_count": len(obss),
                 "matched_ident": match.ident if match else None,
                 "matched_name": match.name if match else None,
                 "matched_telescope": scope.name if scope else None,
@@ -218,20 +302,46 @@ async def import_file(
     file: UploadFile = File(...),
     object_name: str = Form(...),
     device_name: str = Form(default=""),
+    observation_id: str = Form(default=""),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Importiert genau eine Datei in die Aufnahme (Objekt, Gerät)."""
+    """Importiert genau eine Datei. Ohne observation_id wird der NEUESTE
+    bestehende Eintrag zu (Objekt, Gerät) ergänzt bzw. einer angelegt; mit
+    observation_id (siehe POST /observation) landet die Datei gezielt in
+    diesem — für die Option „komplett neuer Verwaltungseintrag"."""
     obj_label = object_name.strip()
     if not obj_label:
         raise HTTPException(400, "object_name fehlt")
 
     cat = (await _catalog_map(db)).get(asi.normalize_object(obj_label))
     scope = await _telescope_by_name(db, user, device_name)
-    obs = await _upsert_observation(
-        db, user, cat, cat.ident if cat else obj_label,
-        scope.id if scope else None,
+
+    # Duplikatschutz über ALLE Einträge zu (Objekt, Gerät): ein Sub darf nie
+    # in zwei Verwaltungseinträgen registriert sein.
+    matching = await _matching_observations(
+        db, user, cat, cat.ident if cat else obj_label, scope.id if scope else None
     )
+    filename_early = PurePosixPath((file.filename or "").replace("\\", "/")).name
+    if filename_early and filename_early in await _known_filenames(db, matching):
+        return {
+            "file": filename_early, "status": "duplicate", "error": None,
+            "observation_id": None, "dest": None,
+        }
+
+    if observation_id:
+        import uuid as _uuid
+        try:
+            obs = await db.get(Observation, _uuid.UUID(observation_id))
+        except ValueError:
+            raise HTTPException(400, "Ungültige observation_id")
+        if not obs or obs.user_id != user.id:
+            raise HTTPException(404, "Aufnahme nicht gefunden")
+    else:
+        obs = matching[0] if matching else await _create_observation(
+            db, user, cat, cat.ident if cat else obj_label,
+            scope.id if scope else None,
+        )
 
     filename = PurePosixPath((file.filename or "upload.fit").replace("\\", "/")).name
     tmp_path = None

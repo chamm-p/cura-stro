@@ -13,10 +13,13 @@ interface Group {
   key: string; object: string; device: string; files: Picked[]
   matched_ident: string | null; matched_name: string | null; matched_telescope: string | null
   filters: { filter: string; subs: number }[]; nights: number; warnings: string[]
+  entry_exists: boolean; existing_subs: number
   sel: boolean
+  newEntry: boolean // Häkchen: komplett neuen Verwaltungseintrag anlegen
 }
 interface ScanGroup {
   object: string; device: string; files: number; new: number; registered: number
+  entry_exists: boolean; entry_count: number
   matched_ident: string | null; matched_name: string | null; matched_telescope: string | null
   warnings: string[]
 }
@@ -64,6 +67,7 @@ export default function FileImportModal({ onClose, onImported }: { onClose: () =
   const [scanning, setScanning] = useState(false)
   const [registering, setRegistering] = useState(false)
   const [scanResult, setScanResult] = useState<number | null>(null)
+  const [scanNewEntries, setScanNewEntries] = useState<Set<string>>(new Set())
   const [err, setErr] = useState('')
   const dirRef = useRef<HTMLInputElement>(null)
   const abortRef = useRef(false)
@@ -106,7 +110,9 @@ export default function FileImportModal({ onClose, onImported }: { onClose: () =
             matched_name: meta?.matched_name ?? null,
             matched_telescope: meta?.matched_telescope ?? null,
             filters: meta?.filters ?? [], nights: meta?.nights ?? 0,
-            warnings: meta?.warnings ?? [], sel: true,
+            entry_exists: meta?.entry_exists ?? false,
+            existing_subs: meta?.existing_subs ?? 0,
+            warnings: meta?.warnings ?? [], sel: true, newEntry: false,
           })
         }
         return next
@@ -139,10 +145,13 @@ export default function FileImportModal({ onClose, onImported }: { onClose: () =
 
   // ─── NAS-Scan: Bestandsdateien registrieren, ohne sie zu kopieren ───
   const doScan = async (dryRun: boolean) => {
-    if (dryRun) { setScanning(true) } else { setRegistering(true) }
+    if (dryRun) { setScanning(true); setScanNewEntries(new Set()) } else { setRegistering(true) }
     setErr(''); setScanResult(null)
     try {
-      const r = await api.post('/api/import/scan', { dry_run: dryRun }, { timeout: 600000 })
+      const r = await api.post('/api/import/scan', {
+        dry_run: dryRun,
+        new_entries: dryRun ? [] : [...scanNewEntries],
+      }, { timeout: 600000 })
       setScanGroups(r.data.groups)
       setScanFolder(r.data.raw_folder)
       if (!dryRun) {
@@ -153,6 +162,8 @@ export default function FileImportModal({ onClose, onImported }: { onClose: () =
       setErr(e.response?.data?.detail || 'NAS-Scan fehlgeschlagen.')
     } finally { setScanning(false); setRegistering(false) }
   }
+  const toggleScanNewEntry = (key: string) =>
+    setScanNewEntries((s) => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n })
 
   const doImport = async () => {
     const selected = groups.filter((g) => g.sel)
@@ -171,6 +182,21 @@ export default function FileImportModal({ onClose, onImported }: { onClose: () =
     }
     try {
       for (const g of selected) {
+        // Option „komplett neuer Verwaltungseintrag": Eintrag EINMAL anlegen,
+        // alle Dateien der Gruppe landen gezielt darin.
+        let obsId = ''
+        if (g.newEntry) {
+          try {
+            const r = await api.post('/api/import/observation', {
+              object_name: g.object.trim(), device_name: g.device.trim(),
+            })
+            obsId = r.data.observation_id
+          } catch (e: any) {
+            noteError(e.response?.data?.detail || 'Neuer Eintrag konnte nicht angelegt werden')
+            done += g.files.length
+            continue
+          }
+        }
         for (const p of g.files) {
           if (abortRef.current) break
           setProgress({ done, total, current: `${g.object}${g.device ? '/' + g.device : ''} · ${p.file.name}` })
@@ -178,6 +204,7 @@ export default function FileImportModal({ onClose, onImported }: { onClose: () =
           fd.append('file', p.file, p.file.name)
           fd.append('object_name', g.object.trim())
           fd.append('device_name', g.device.trim())
+          if (obsId) fd.append('observation_id', obsId)
           try {
             const r = await api.post('/api/import/file', fd, { timeout: 300000 })
             if (r.data.status === 'filed') filed++
@@ -273,6 +300,19 @@ export default function FileImportModal({ onClose, onImported }: { onClose: () =
                   )}
                   {g.matched_ident && <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[11px] text-emerald-300">✓ {g.matched_ident}</span>}
                   {g.matched_telescope && <span className="flex items-center gap-1 rounded-full bg-emerald-500/20 px-2 py-0.5 text-[11px] text-emerald-300"><Telescope className="h-3 w-3" /> {g.matched_telescope}</span>}
+                  {g.entry_exists && g.new > 0 && scanResult === null && (
+                    <>
+                      {!scanNewEntries.has(`${g.object}|${g.device}`) && (
+                        <span className="rounded-full bg-cyan-500/20 px-2 py-0.5 text-[11px] text-cyan-200" title="Neue Subs werden dem bestehenden Verwaltungseintrag hinzugefügt">
+                          ergänzt Eintrag{g.entry_count > 1 ? ` (neuester von ${g.entry_count})` : ''}
+                        </span>
+                      )}
+                      <label className="flex cursor-pointer items-center gap-1.5 rounded-full border border-white/10 px-2 py-0.5 text-[11px] text-slate-300 hover:bg-white/5" title="Statt zu ergänzen: eigenständigen Eintrag anlegen (z. B. Nacht 2 getrennt entwickeln)">
+                        <input type="checkbox" checked={scanNewEntries.has(`${g.object}|${g.device}`)} disabled={registering} onChange={() => toggleScanNewEntry(`${g.object}|${g.device}`)} className="h-3 w-3 accent-indigo-500" />
+                        als neuen Eintrag
+                      </label>
+                    </>
+                  )}
                   {g.warnings.map((w, i) => (
                     <span key={i} className="flex items-center gap-1 text-[11px] text-amber-300"><AlertTriangle className="h-3 w-3" /> {w}</span>
                   ))}
@@ -329,6 +369,17 @@ export default function FileImportModal({ onClose, onImported }: { onClose: () =
                   )}
                   {g.matched_telescope && (
                     <span className="flex items-center gap-1 rounded-full bg-emerald-500/20 px-2 py-0.5 text-[11px] text-emerald-300"><Telescope className="h-3 w-3" /> {g.matched_telescope}</span>
+                  )}
+                  {g.entry_exists && !g.newEntry && (
+                    <span className="rounded-full bg-cyan-500/20 px-2 py-0.5 text-[11px] text-cyan-200" title="Neue Subs werden dem bestehenden Verwaltungseintrag hinzugefügt">
+                      ergänzt Eintrag ({g.existing_subs} Subs)
+                    </span>
+                  )}
+                  {g.entry_exists && (
+                    <label className="flex cursor-pointer items-center gap-1.5 rounded-full border border-white/10 px-2 py-0.5 text-[11px] text-slate-300 hover:bg-white/5" title="Statt zu ergänzen: eigenständigen Eintrag anlegen (z. B. Nacht 2 getrennt entwickeln)">
+                      <input type="checkbox" checked={g.newEntry} disabled={importing} onChange={(e) => patchGroup(g.key, { newEntry: e.target.checked })} className="h-3 w-3 accent-indigo-500" />
+                      als neuen Eintrag
+                    </label>
                   )}
                 </div>
                 {g.filters.length > 0 && (
