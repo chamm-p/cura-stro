@@ -1,11 +1,12 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
-import { ListChecks, Trash2, Plus, Loader2, Image as ImageIcon, ChevronUp, ChevronDown, StickyNote, X, Layers, Radio, AlertTriangle, Cpu, UploadCloud } from 'lucide-react'
+import { ListChecks, Trash2, Plus, Loader2, Image as ImageIcon, ChevronUp, ChevronDown, StickyNote, X, Layers, Radio, AlertTriangle, Cpu, UploadCloud, Zap } from 'lucide-react'
 import api from '../services/api'
 import Layout from '../components/Layout'
 import SubsModal from '../components/SubsModal'
 import ResultsModal from '../components/ResultsModal'
 import AsiairImportModal from '../components/AsiairImportModal'
 import FileImportModal from '../components/FileImportModal'
+import BatchProcessModal from '../components/BatchProcessModal'
 
 interface Obs {
   id: string; catalog_object_id: string | null
@@ -47,8 +48,8 @@ interface PiJob {
   frame_info: { object_name?: string; device_name?: string } | null
   created_at: string
 }
-const PI_ACTIVE = ['starting', 'sent', 'running']
-const PI_LABEL: Record<string, string> = { starting: 'überträgt', sent: 'wartet', running: 'läuft' }
+const PI_ACTIVE = ['queued', 'starting', 'sent', 'running']
+const PI_LABEL: Record<string, string> = { queued: 'in Warteschlange', starting: 'überträgt', sent: 'wartet', running: 'läuft' }
 
 function PixiQueue({ onDone }: { onDone: () => void }) {
   const [jobs, setJobs] = useState<PiJob[]>([])
@@ -157,6 +158,9 @@ export default function Manage() {
   const [deleteFor, setDeleteFor] = useState<Obs | null>(null)
   const [asiairOpen, setAsiairOpen] = useState(false)
   const [fileImportOpen, setFileImportOpen] = useState(false)
+  // Mehrfachauswahl für Stapel-Verarbeitung
+  const [selIds, setSelIds] = useState<Set<string>>(new Set())
+  const [batchOpen, setBatchOpen] = useState(false)
   const [sortField, setSortField] = useState<string | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
@@ -178,6 +182,14 @@ export default function Manage() {
     return arr
   }, [rows, sortField, sortDir])
   const newCount = rows.filter((r) => r.is_new).length
+
+  // ─── Mehrfachauswahl (nur Aufnahmen mit Subs sind verarbeitbar) ───
+  const selectable = (r: Obs) => r.subframe_count > 0
+  const selectableRows = sorted.filter(selectable)
+  const allSelected = selectableRows.length > 0 && selectableRows.every((r) => selIds.has(r.id))
+  const toggleSel = (id: string) => setSelIds((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
+  const toggleSelAll = () => setSelIds(allSelected ? new Set() : new Set(selectableRows.map((r) => r.id)))
+  const batchTargets = sorted.filter((r) => selIds.has(r.id)).map((r) => ({ id: r.id, label: r.object_ident || r.target_label || r.display_label, status: r.status }))
 
   const toggleSort = (f: string) => {
     if (sortField === f) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
@@ -220,6 +232,16 @@ export default function Manage() {
 
       <PixiQueue onDone={load} />
 
+      {selIds.size > 0 && (
+        <div className="mt-3 flex flex-wrap items-center gap-3 rounded-xl border border-indigo-400/30 bg-indigo-500/10 px-3 py-2.5 text-sm">
+          <span className="font-medium text-indigo-100">{selIds.size} ausgewählt</span>
+          <button onClick={() => setBatchOpen(true)} className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-3.5 py-1.5 text-xs font-medium text-white hover:from-indigo-400 hover:to-violet-500">
+            <Zap className="h-3.5 w-3.5" /> Stapel verarbeiten
+          </button>
+          <button onClick={() => setSelIds(new Set())} className="rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-white/10">Auswahl aufheben</button>
+        </div>
+      )}
+
       <div className="mt-5 flex gap-2">
         <input className={`${input} flex-1`} placeholder="Eigenes Ziel planen, z. B. Mosaik Cygnus …" value={newLabel}
           onChange={(e) => setNewLabel(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addManual()} />
@@ -243,6 +265,10 @@ export default function Manage() {
           <table className="w-full text-sm">
             <thead className="bg-[#0c1024] text-left text-xs text-slate-400">
               <tr>
+                <th className="px-3 py-2.5">
+                  <input type="checkbox" checked={allSelected} onChange={toggleSelAll} disabled={selectableRows.length === 0}
+                    title="Alle mit Subs auswählen" className="h-4 w-4 accent-indigo-500 disabled:opacity-30" />
+                </th>
                 <SortTh label="Objekt" field="object" active={sortField} dir={sortDir} onClick={toggleSort} />
                 <th className="px-3 py-2.5">Typ</th>
                 <SortTh label="Status" field="status" active={sortField} dir={sortDir} onClick={toggleSort} />
@@ -257,7 +283,12 @@ export default function Manage() {
             </thead>
             <tbody>
               {sorted.map((r) => (
-                <tr key={r.id} className={`border-t border-white/5 hover:bg-white/[0.03] ${r.is_new ? 'bg-green-500/10' : ''}`}>
+                <tr key={r.id} className={`border-t border-white/5 hover:bg-white/[0.03] ${selIds.has(r.id) ? 'bg-indigo-500/10' : r.is_new ? 'bg-green-500/10' : ''}`}>
+                  <td className="px-3 py-2">
+                    <input type="checkbox" checked={selIds.has(r.id)} onChange={() => toggleSel(r.id)} disabled={!selectable(r)}
+                      title={selectable(r) ? 'Für Stapel-Verarbeitung auswählen' : 'Keine Subs — nicht verarbeitbar'}
+                      className="h-4 w-4 accent-indigo-500 disabled:opacity-20" />
+                  </td>
                   <td className="px-3 py-2">
                     <div className="flex items-center gap-2">
                       <span className="font-medium">{r.object_ident || r.target_label}</span>
@@ -299,8 +330,10 @@ export default function Manage() {
                     </select>
                   </td>
                   <td className="px-3 py-2">
-                    <button onClick={() => setResFor(r)} title="PixInsight-Ergebnis" className="flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs text-slate-200 hover:bg-white/10">
-                      <ImageIcon className="h-3.5 w-3.5" /> {r.result_count > 0 ? r.result_count : 'Ergebnis'}
+                    <button onClick={() => { if (selIds.size > 0) setBatchOpen(true); else setResFor(r) }}
+                      title={selIds.size > 0 ? `Stapel-Verarbeitung für ${selIds.size} Objekt(e)` : 'PixInsight-Ergebnis'}
+                      className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs hover:bg-white/10 ${selIds.size > 0 ? 'border-indigo-400/40 text-indigo-200' : 'border-white/10 text-slate-200'}`}>
+                      {selIds.size > 0 ? <Zap className="h-3.5 w-3.5" /> : <ImageIcon className="h-3.5 w-3.5" />} {selIds.size > 0 ? 'Stapel' : (r.result_count > 0 ? r.result_count : 'Ergebnis')}
                     </button>
                   </td>
                   <td className="px-3 py-2">
@@ -342,6 +375,13 @@ export default function Manage() {
       )}
       {asiairOpen && <AsiairImportModal onClose={() => setAsiairOpen(false)} onImported={load} />}
       {fileImportOpen && <FileImportModal onClose={() => setFileImportOpen(false)} onImported={load} />}
+      {batchOpen && (
+        <BatchProcessModal
+          targets={batchTargets}
+          onClose={() => setBatchOpen(false)}
+          onStarted={() => { setSelIds(new Set()); load() }}
+        />
+      )}
       {deleteFor && (
         <DeleteModal
           obs={deleteFor}

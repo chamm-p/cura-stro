@@ -138,6 +138,20 @@ class BackendJob:
 
 _backend_jobs: dict[str, BackendJob] = {}
 
+# Pro Agent-URL ein Transfer-Lock: die schwere NAS→Agent-Übertragung läuft
+# je Rechner SERIELL (mehrere angestoßene Jobs stauen sich → LAN wird nicht
+# von N gleichzeitigen 18-GB-Uploads erschlagen). Verschiedene Agents (Mac,
+# Windows) übertragen weiterhin parallel.
+_transfer_locks: dict[str, asyncio.Lock] = {}
+
+
+def _transfer_lock_for(base: str) -> asyncio.Lock:
+    lock = _transfer_locks.get(base or "")
+    if lock is None:
+        lock = asyncio.Lock()
+        _transfer_locks[base or ""] = lock
+    return lock
+
 
 def list_agents() -> list[dict[str, str]]:
     """Konfigurierte PixInsight-Agents (1 = primär, 2 = optional zweiter
@@ -629,11 +643,20 @@ async def _do_batch_transfer(
     frame_info: dict[str, Any],
 ) -> None:
     """Hintergrund-Task: liest RAW-Dateien vom NAS, zippt sie und lädt sie
-    per HTTP an den Mac-Agent hoch.  Aktualisiert den BackendJob-Status."""
+    per HTTP an den Agent hoch.  Aktualisiert den BackendJob-Status.
+
+    Die eigentliche Arbeit läuft unter einem Transfer-Lock PRO AGENT: bei
+    mehreren angestoßenen Jobs (Stapel-Verarbeitung) überträgt immer nur
+    einer zur Zeit auf denselben Rechner — die übrigen bleiben 'queued'."""
     from datetime import datetime, timezone
 
     tmpdir_obj = tempfile.TemporaryDirectory(prefix="curastro_pi_")
     tmpdir = tmpdir_obj.name
+    # Transfer-Lock je Agent: wartende Jobs bleiben 'queued', bis der
+    # Vorgänger seine Übertragung abgeschlossen hat (release im finally).
+    lock = _transfer_lock_for(job.agent_base)
+    await lock.acquire()
+    job.status = "starting"
     try:
         async with async_session() as db:
             # Observation und User laden
@@ -772,6 +795,7 @@ async def _do_batch_transfer(
             pass
     finally:
         tmpdir_obj.cleanup()
+        lock.release()
 
 
 async def trigger_batch(
@@ -815,7 +839,9 @@ async def trigger_batch(
         id=str(uuid.uuid4()),
         obs_id=str(obs.id),
         user_id=str(user.id),
-        status="starting",
+        # 'queued': wartet ggf. auf den Transfer-Lock des Agents; wechselt
+        # in _do_batch_transfer auf 'starting', sobald die Übertragung läuft.
+        status="queued",
         agent_id=agent,
         agent_base=agent_base,
         mode=mode,
@@ -950,6 +976,10 @@ async def poll_job_results(
     if not bjob:
         raise ValueError(f"Job {job_id} nicht gefunden")
 
+    # Phase 0: wartet auf den Transfer-Lock des Agents (Stapel-Verarbeitung)
+    if bjob.status == "queued":
+        return {"job_id": job_id, "status": "queued", "message": "Wartet auf vorherige Übertragung …"}
+
     # Phase 1: Backend sammelt noch Dateien
     if bjob.status == "starting":
         return {"job_id": job_id, "status": "starting", "message": "RAW-Dateien werden gesammelt …"}
@@ -1072,7 +1102,7 @@ def remove_backend_job(job_id: str, user_id: str) -> bool:
     j = _backend_jobs.get(job_id)
     if not j or j.user_id != user_id:
         return False
-    if j.status in ("starting", "sent", "running"):
+    if j.status in ("queued", "starting", "sent", "running"):
         return False
     _backend_jobs.pop(job_id, None)
     _finalize_locks.pop(job_id, None)
@@ -1090,11 +1120,16 @@ async def check_job_status(job_id: str) -> dict[str, Any]:
     if not bjob:
         return {"status": "unknown", "error": f"Job {job_id} nicht gefunden"}
 
+    # Phase 0: wartet auf den Transfer-Lock (Stapel)
+    if bjob.status == "queued":
+        return {"status": "queued", "message": "Wartet auf vorherige Übertragung …",
+                "input_files": bjob.input_files}
+
     # Phase 1: Backend sammelt noch Dateien
     if bjob.status == "starting":
         return {
             "status": "starting",
-            "message": "RAW-Dateien werden gesammelt und an den Mac-Agent gesendet …",
+            "message": "RAW-Dateien werden gesammelt und an den Agent gesendet …",
             "input_files": bjob.input_files,
         }
 
