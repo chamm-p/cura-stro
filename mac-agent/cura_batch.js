@@ -220,8 +220,14 @@ if (lights.length === 0) {
 }
 
 // ─── Verzeichnisse ───
-var calDir = outputDir + "/calibrated";
-var alignedDir = outputDir + "/aligned";
+// Zwischenframes NICHT unter outputDir ablegen — sonst landen die grossen
+// kalibrierten/ausgerichteten Einzelframes im Ergebnis-ZIP. Sie kommen in
+// ein Schwester-Verzeichnis <jobdir>/work.
+var _jd = outputDir;
+var _sl = _jd.lastIndexOf("/");
+var workDir = (_sl >= 0 ? _jd.substring(0, _sl) : _jd) + "/work";
+var calDir = workDir + "/calibrated";
+var alignedDir = workDir + "/aligned";
 if (!File.directoryExists(calDir))
     File.createDirectory(calDir, true);
 if (!File.directoryExists(alignedDir))
@@ -599,122 +605,106 @@ for (var g = 0; g < filterNames.length; ++g) {
 }
 flush();
 
+function _iiHas(name) { return typeof ImageIntegration.prototype[name] !== "undefined"; }
+
+function _configureII(ii, frames, conservative) {
+    var iiInputs = [];
+    for (var i = 0; i < frames.length; ++i) iiInputs.push([true, frames[i], "", ""]);
+    ii.images = iiInputs;
+    ii.inputHints = "fits-keywords normalize raw cfa signed-is-physical";
+    ii.combination = ImageIntegration.prototype.Average;
+    // Gewichtung: normal PSFSignalWeight; konservativ gar keine (DontCare).
+    if (conservative) {
+        if (_iiHas("DontCare")) ii.weightMode = ImageIntegration.prototype.DontCare;
+    } else if (_iiHas("PSFSignalWeight")) {
+        ii.weightMode = ImageIntegration.prototype.PSFSignalWeight;
+    } else if (_iiHas("NoiseEvaluation")) {
+        ii.weightMode = ImageIntegration.prototype.NoiseEvaluation;
+    }
+    ii.weightScale = ImageIntegration.prototype.WeightScale_BWMV;
+    // Normalisierung: konservativ additiv (ohne Scaling — robuster bei
+    // schwachem Schmalband-Signal).
+    ii.normalization = (conservative && _iiHas("Additive"))
+        ? ImageIntegration.prototype.Additive
+        : ImageIntegration.prototype.AdditiveWithScaling;
+    // Rejection abhängig von der Frame-Zahl (zu wenige Frames → Winsorized
+    // scheitert). Konservativ: Percentile bzw. keine.
+    if (!conservative && frames.length >= 8 && _iiHas("WinsorizedSigmaClip"))
+        ii.rejection = ImageIntegration.prototype.WinsorizedSigmaClip;
+    else if (frames.length >= 3 && _iiHas("PercentileClip"))
+        ii.rejection = ImageIntegration.prototype.PercentileClip;
+    else if (_iiHas("NoRejection"))
+        ii.rejection = ImageIntegration.prototype.NoRejection;
+    ii.rejectionNormalization = ImageIntegration.prototype.Scale;
+    ii.pcClipLow = 0.200; ii.pcClipHigh = 0.100;
+    ii.sigmaLow = 4.000; ii.sigmaHigh = 3.000; ii.winsorizationCutoff = 5.000;
+    ii.clipLow = true; ii.clipHigh = true;
+    // Range-Clipping bei 0.0 verwirft bei kalibriertem Schmalband massenhaft
+    // Pixel → kann die Integration scheitern lassen. Konservativ komplett aus.
+    ii.rangeClipLow = conservative ? false : true;
+    ii.rangeLow = 0.0;
+    ii.rangeClipHigh = false;
+    ii.rangeHigh = 0.98;
+    ii.generate64BitResult = false;
+    ii.generateRejectionMaps = false;
+    ii.generateIntegratedImage = true;
+    ii.generateDrizzleData = false;
+    ii.closePreviousImages = false;
+    ii.autoMemorySize = true;
+    ii.autoMemoryLimit = 0.75;
+    ii.useCache = false;   // frische Frames — Cache bringt nichts, spart NAS-IO
+    ii.evaluateNoise = conservative ? false : true;
+    ii.subtractPedestals = false;
+    ii.truncateOnOutOfRange = false;
+    ii.noGUIMessages = true;
+    ii.showImages = false;
+    ii.useFileThreads = true;
+    ii.useBufferThreads = true;
+    ii.maxBufferThreads = 8;
+}
+
 function integrateGroup(frames, outPath, label) {
-
-flog("\nIntegriere " + label + " (" + frames.length + " Frames) → " + outPath);
-flush();
-
-var iiInputs = [];
-for (var i = 0; i < frames.length; ++i) {
-    // Format: [enabled, path, drizzlePath, localNormDataPath]
-    iiInputs.push([true, frames[i], "", ""]);
-}
-
-var ii = new ImageIntegration;
-ii.images = iiInputs;
-ii.inputHints = "fits-keywords normalize raw cfa signed-is-physical";
-ii.combination = ImageIntegration.prototype.Average;
-// Enum-Name je nach PI-Version: NoiseEvaluation (aelter) / PSFSignalWeight (1.8.9+).
-if (typeof ImageIntegration.prototype.PSFSignalWeight !== "undefined")
-    ii.weightMode = ImageIntegration.prototype.PSFSignalWeight;
-else if (typeof ImageIntegration.prototype.NoiseEvaluation !== "undefined")
-    ii.weightMode = ImageIntegration.prototype.NoiseEvaluation;
-ii.weightKeyword = "";
-ii.weightScale = ImageIntegration.prototype.WeightScale_BWMV;
-ii.adaptiveGridSize = 16;
-ii.adaptiveNoScale = false;
-ii.ignoreNoiseKeywords = false;
-ii.normalization = ImageIntegration.prototype.AdditiveWithScaling;
-ii.rejection = ImageIntegration.prototype.WinsorizedSigmaClip;
-ii.rejectionNormalization = ImageIntegration.prototype.Scale;
-ii.minMaxLow = 1;
-ii.minMaxHigh = 1;
-ii.pcClipLow = 0.200;
-ii.pcClipHigh = 0.100;
-ii.sigmaLow = 4.000;
-ii.sigmaHigh = 3.000;
-ii.winsorizationCutoff = 5.000;
-ii.linearFitLow = 5.000;
-ii.linearFitHigh = 4.000;
-ii.esdOutliersFraction = 0.30;
-ii.esdAlpha = 0.05;
-ii.esdLowRelaxation = 1.50;
-ii.ccdGain = 1.00;
-ii.ccdReadNoise = 10.00;
-ii.ccdScaleNoise = 0.00;
-ii.clipLow = true;
-ii.clipHigh = true;
-ii.rangeClipLow = true;
-ii.rangeLow = 0.0;
-ii.rangeClipHigh = false;
-ii.rangeHigh = 0.98;
-ii.mapRangeRejection = true;
-ii.reportRangeRejection = false;
-ii.largeScaleClipLow = false;
-ii.largeScaleClipLowProtectedLayers = 2;
-ii.largeScaleClipLowGrowth = 2;
-ii.largeScaleClipHigh = false;
-ii.largeScaleClipHighProtectedLayers = 2;
-ii.largeScaleClipHighGrowth = 2;
-ii.generate64BitResult = false;
-ii.generateRejectionMaps = false;
-ii.generateIntegratedImage = true;
-ii.generateDrizzleData = false;
-ii.closePreviousImages = false;
-ii.bufferSizeMB = 16;
-ii.stackSizeMB = 1024;
-ii.autoMemorySize = true;
-ii.autoMemoryLimit = 0.75;
-ii.useROI = false;
-ii.roiX0 = 0;
-ii.roiY0 = 0;
-ii.roiX1 = 0;
-ii.roiY1 = 0;
-ii.useCache = true;
-ii.evaluateNoise = true;
-ii.mrsMinDataFraction = 0.010;
-ii.subtractPedestals = false;
-ii.truncateOnOutOfRange = false;
-ii.noGUIMessages = true;
-ii.showImages = false;
-ii.useFileThreads = true;
-ii.fileThreadOverload = 1.00;
-ii.useBufferThreads = true;
-ii.maxBufferThreads = 8;
-
-var iiOk = ii.executeGlobal();
-processEvents();
-gc();
-
-if (!iiOk) {
-    flog("KRITISCH: ImageIntegration fehlgeschlagen (" + label + ")");
+    flog("\nIntegriere " + label + " (" + frames.length + " Frames) → " + outPath);
     flush();
-    throw new Error("ImageIntegration failed: " + label);
-}
-
-// Ergebnis-Window über integrationImageId finden
-var intWin = ImageWindow.windowById(ii.integrationImageId);
-if (intWin.isNull) {
-    flog("KRITISCH: ImageIntegration lieferte kein Ergebnis-Window (" + label + ")");
+    // Zwei Anläufe: normal, dann konservativ (robuster bei schwachem Signal).
+    var attempts = [false, true];
+    for (var a = 0; a < attempts.length; a++) {
+        var ii = new ImageIntegration;
+        var ok = false;
+        try {
+            _configureII(ii, frames, attempts[a]);
+            ok = ii.executeGlobal();
+        } catch (e) {
+            flog("  Versuch " + (a + 1) + " warf: " + e);
+            ok = false;
+        }
+        processEvents(); gc();
+        if (!ok) {
+            flog("  Versuch " + (a + 1) + (attempts[a] ? " (konservativ)" : "") + " fehlgeschlagen (" + label + ")");
+            flush();
+            continue;
+        }
+        var intWin = ImageWindow.windowById(ii.integrationImageId);
+        if (intWin.isNull) {
+            flog("  kein Ergebnis-Window (" + label + ")");
+            flush();
+            continue;
+        }
+        try { saveImage(outPath, intWin); } finally { intWin.forceClose(); }
+        flog("Master (" + label + ") gespeichert" + (attempts[a] ? " [konservativ]" : "") + ": " + outPath);
+        flush();
+        return outPath;
+    }
+    flog("FEHLER: Integration fuer " + label + " auch konservativ fehlgeschlagen — Filter uebersprungen");
     flush();
-    throw new Error("ImageIntegration produced no window: " + label);
+    return null;   // NICHT werfen — die anderen Filter sollen weiterlaufen
 }
 
-try {
-    saveImage(outPath, intWin);
-} finally {
-    intWin.forceClose();
-}
-
-flog("Master (" + label + ") gespeichert: " + outPath);
-flush();
-return outPath;
-
-} // integrateGroup
-
-// ImageIntegration braucht mindestens 3 Frames pro Stack.
+// ImageIntegration braucht mindestens 3 Frames pro Stack. Ein einzelner
+// fehlschlagender Filter kippt NICHT den ganzen Job.
 var masters = [];
 var skipped = [];
+var failed = [];
 for (var g = 0; g < filterNames.length; ++g) {
     var flt = filterNames[g];
     var frames = filterGroups[flt];
@@ -727,23 +717,23 @@ for (var g = 0; g < filterNames.length; ++g) {
     }
     var suffix = (filterNames.length === 1 && flt === "NoFilter") ? "" : "_" + flt;
     var outPath = outputDir + "/master_" + objName + suffix + ".xisf";
-    masters.push(integrateGroup(frames, outPath, flt));
+    var res = null;
+    try { res = integrateGroup(frames, outPath, flt); }
+    catch (e) { flog("Filter " + flt + " Ausnahme: " + e); flush(); }
+    if (res) masters.push(res); else failed.push(flt);
 }
 
 if (masters.length === 0) {
-    flog("KRITISCH: Keine Filter-Gruppe hatte genug Frames für einen Stack");
+    flog("KRITISCH: kein einziger Filter-Master erzeugt (fehlgeschlagen: " + failed.join(", ") + ")");
     flush();
-    throw new Error("No filter group had enough frames to integrate");
+    throw new Error("No filter master produced");
 }
 
 // ─── Zwischenergebnisse aufräumen ───
-// Ausgerichtete Einzelframes sind gross (Float32) und jederzeit
-// reproduzierbar — sie werden NICHT mit zurückübertragen. Nur die Master
-// (je Filter + Bias/Dark/Flat) bleiben im Output. (calibrated/ wurde schon
-// direkt nach dem Alignment freigegeben.)
-flog("Räume Zwischenergebnisse auf (aligned/) …");
-removeTree(calDir);
-removeTree(alignedDir);
+// Das komplette work/-Verzeichnis (calibrated/ + aligned/) liegt AUSSERHALB
+// von output/ und wird verworfen — nur die Master bleiben im Output.
+flog("Räume Zwischenergebnisse auf (work/) …");
+removeTree(workDir);
 
 flog("\n=== Batch abgeschlossen ===");
 flog("Output-Verzeichnis: " + outputDir);
@@ -753,6 +743,9 @@ for (var m = 0; m < masters.length; ++m) {
 }
 if (skipped.length > 0) {
     flog("Übersprungen (zu wenige Frames): " + skipped.join(", "));
+}
+if (failed.length > 0) {
+    flog("FEHLGESCHLAGEN (Integration): " + failed.join(", "));
 }
 flush();
 
