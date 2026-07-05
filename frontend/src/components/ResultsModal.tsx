@@ -69,6 +69,9 @@ export default function ResultsModal({
   const [processMode, setProcessMode] = useState<ProcessMode>('shell_sim')
   const [precheck, setPrecheck] = useState<PrecheckResult | null>(null)
   const [precheckLoading, setPrecheckLoading] = useState(false)
+  // Agent-Auswahl (mehrere Rechner mit PixInsight, z. B. Mac + Windows)
+  const [agents, setAgents] = useState<{ id: string; name: string }[]>([])
+  const [piAgent, setPiAgent] = useState('1')
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const load = useCallback(() => {
@@ -78,12 +81,18 @@ export default function ResultsModal({
 
   useEffect(() => { load() }, [load])
 
-  // Pre-Flight-Check automatisch beim Öffnen (nur wenn status === 'raw')
+  // Verfügbare Agents laden (Auswahl erscheint nur bei mehreren)
   useEffect(() => {
-    if (status === 'raw' && piStatus === 'idle') {
+    api.get('/api/pixinsight/agents').then((r) => setAgents(r.data.agents || [])).catch(() => {})
+  }, [])
+
+  // Pre-Flight-Check automatisch beim Öffnen (nur wenn status === 'raw') —
+  // und erneut bei Agent-Wechsel.
+  useEffect(() => {
+    if (status === 'raw' && (piStatus === 'idle' || piStatus === 'ready')) {
       setPiStatus('prechecking')
       setPrecheckLoading(true)
-      api.get(`/api/observations/${observationId}/precheck`)
+      api.get(`/api/observations/${observationId}/precheck`, { params: { agent: piAgent } })
         .then((r) => {
           setPrecheck(r.data)
           setPiStatus('ready')
@@ -93,7 +102,7 @@ export default function ResultsModal({
         })
         .finally(() => setPrecheckLoading(false))
     }
-  }, [observationId, status]) // eslint-disable-line
+  }, [observationId, status, piAgent]) // eslint-disable-line
 
   // Polling aufräumen
   useEffect(() => {
@@ -112,7 +121,7 @@ export default function ResultsModal({
   const refreshPrecheck = async () => {
     setPrecheckLoading(true)
     try {
-      const r = await api.get(`/api/observations/${observationId}/precheck`)
+      const r = await api.get(`/api/observations/${observationId}/precheck`, { params: { agent: piAgent } })
       setPrecheck(r.data)
     } catch { /* ignore */ }
     finally { setPrecheckLoading(false) }
@@ -122,7 +131,7 @@ export default function ResultsModal({
   const startBatch = async () => {
     setPiStatus('starting'); setPiMsg('Job wird gestartet …'); setErr('')
     try {
-      const r = await api.post(`/api/observations/${observationId}/process`, { mode: processMode }, { timeout: 30000 })
+      const r = await api.post(`/api/observations/${observationId}/process`, { mode: processMode, agent: piAgent }, { timeout: 30000 })
       setPiJobId(r.data.job_id)
       setPiStatus('running')
       const modeLabel = processMode === 'shell_sim' ? 'Shell-Simulation' : processMode === 'fastbatch' ? 'FastBatch' : 'WBPP'
@@ -446,6 +455,26 @@ export default function ResultsModal({
 
                     {/* Processing-Modus-Auswahl + Start-Button */}
                     <div className="flex flex-wrap items-center gap-3 pt-1">
+                      {agents.length > 1 && (
+                        <div className="flex flex-wrap items-center gap-2">
+                          <label className="text-xs text-slate-400">Rechner:</label>
+                          <div className="flex gap-1.5">
+                            {agents.map((a) => (
+                              <button
+                                key={a.id}
+                                onClick={() => setPiAgent(a.id)}
+                                className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                                  piAgent === a.id
+                                    ? 'bg-indigo-500/30 text-indigo-200 ring-1 ring-indigo-400/50'
+                                    : 'border border-white/10 text-slate-400 hover:bg-white/5'
+                                }`}
+                              >
+                                {a.name}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                       <div className="flex flex-wrap items-center gap-2">
                         <label className="text-xs text-slate-400">Modus:</label>
                         <div className="flex gap-1.5">

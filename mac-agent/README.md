@@ -118,6 +118,25 @@ Umgebungsvariablen (direkt beim Start oder in einer `.env`-Datei neben `agent.py
 | `CALIB_CACHE_DIR` | `~/cura-stro-jobs/calib-cache` | Persistenter Calib-Cache (content-adressiert per SHA-256) |
 | `CALIB_CACHE_MAX_GB` | `20` | Cache-Limit — älteste Dateien werden per LRU verdrängt |
 
+**Windows:** Der Agent läuft unverändert auch unter Windows (PixInsight
+dort installiert). Einrichtung:
+
+```powershell
+# Repo klonen/kopieren, dann im mac-agent-Ordner:
+.\start.ps1          # erstellt venv, installiert deps, lädt .env, startet
+.\start.ps1 -Check   # Health-Check
+.\start.ps1 -Stop    # stoppen
+```
+
+`.env` wie auf dem Mac (AGENT_TOKEN identisch zum Backend). Defaults unter
+Windows: `PIXINSIGHT_BIN=C:\Program Files\PixInsight\bin\PixInsight.exe`,
+`WORK_DIR=%USERPROFILE%\cura-stro-jobs` (Netzlaufwerk `Z:\…` oder UNC
+`\\nas\share\…` möglich — der Wächter prüft die Verbindung wie auf dem Mac).
+Im Backend als zweiter Agent eintragen (`PIXINSIGHT_AGENT_URL_2`,
+`WIN_AGENT_IP`) — im Batch-Dialog erscheint dann die Rechner-Auswahl.
+Autostart: Aufgabenplanung → „Bei Anmeldung" → `powershell -WindowStyle
+Hidden -File <Pfad>\start.ps1`.
+
 **Work-Dir auf dem NAS (wenig Platz auf dem Mac):** `WORK_DIR` kann auf ein
 gemountetes NAS-Volume zeigen. In `.env` neben `agent.py`:
 

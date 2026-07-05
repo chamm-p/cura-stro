@@ -111,6 +111,8 @@ class BackendJob:
     user_id: str
     status: str  # starting · sent · running · completed · failed
     agent_job_id: str | None = None
+    agent_id: str = "1"        # welcher Agent (1 = primär, 2 = zweiter)
+    agent_base: str = ""       # dessen URL (fixiert beim Start des Jobs)
     mode: str = "wbpp"
     error: str | None = None
     error_detail: str | None = None  # z. B. cura_batch-Log-Auszug vom Agent
@@ -137,8 +139,28 @@ class BackendJob:
 _backend_jobs: dict[str, BackendJob] = {}
 
 
-async def _agent_url(path: str = "") -> str:
-    base = _cfg.pixinsight_agent_url.rstrip("/")
+def list_agents() -> list[dict[str, str]]:
+    """Konfigurierte PixInsight-Agents (1 = primär, 2 = optional zweiter
+    Rechner, z. B. Windows). Beide teilen sich das Token."""
+    agents = []
+    if _cfg.pixinsight_agent_url:
+        agents.append({"id": "1", "name": _cfg.pixinsight_agent_name or "Agent 1",
+                       "url": _cfg.pixinsight_agent_url})
+    if _cfg.pixinsight_agent_url_2:
+        agents.append({"id": "2", "name": _cfg.pixinsight_agent_name_2 or "Agent 2",
+                       "url": _cfg.pixinsight_agent_url_2})
+    return agents
+
+
+def _agent_base_for(agent_id: str) -> str:
+    for a in list_agents():
+        if a["id"] == agent_id:
+            return a["url"]
+    return _cfg.pixinsight_agent_url
+
+
+async def _agent_url(path: str = "", base: str | None = None) -> str:
+    base = (base or _cfg.pixinsight_agent_url).rstrip("/")
     return f"{base}{path}"
 
 
@@ -397,7 +419,7 @@ async def _prepare_calibration(
 
 
 async def _sync_calib_cache(
-    storage, plan: dict[str, Any], tmpdir: str
+    storage, plan: dict[str, Any], tmpdir: str, base: str | None = None
 ) -> dict[str, Any] | None:
     """Handshake mit dem Agent-Cache: /calib/check → nur Fehlendes hochladen.
 
@@ -410,7 +432,7 @@ async def _sync_calib_cache(
     by_sha = {m["sha256"]: m for m in manifest}
     async with httpx.AsyncClient(timeout=600.0) as client:
         resp = await client.post(
-            await _agent_url("/calib/check"),
+            await _agent_url("/calib/check", base),
             json={"token": token, "files": list(by_sha.values())},
         )
         if resp.status_code == 404:
@@ -428,7 +450,7 @@ async def _sync_calib_cache(
                 await asyncio.to_thread(storage.fetch, src, local)
             with open(local, "rb") as f:
                 up = await client.post(
-                    await _agent_url("/calib/upload"),
+                    await _agent_url("/calib/upload", base),
                     data={"token": token, "sha256": sha, "ext": m["ext"]},
                     files={"file": (f"{sha}{m['ext']}", f, "application/octet-stream")},
                 )
@@ -576,13 +598,13 @@ async def _harvest_calib_masters(
     return harvested
 
 
-async def _cleanup_agent_job(agent_job_id: str) -> None:
+async def _cleanup_agent_job(agent_job_id: str, base: str | None = None) -> None:
     """Sendet DELETE /jobs/{job_id} an den Agent, damit dieser seine
     Temp-Dateien (Input + Output) restlos aufraeumt."""
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.delete(
-                await _agent_url(f"/jobs/{agent_job_id}"),
+                await _agent_url(f"/jobs/{agent_job_id}", base),
                 params={"token": await _agent_token()},
             )
             if resp.status_code == 200:
@@ -649,7 +671,7 @@ async def _do_batch_transfer(
         legacy_calib: list[tuple[str, str]] = []
         calib_json = ""
         try:
-            transfer = await _sync_calib_cache(storage, calib_plan, tmpdir)
+            transfer = await _sync_calib_cache(storage, calib_plan, tmpdir, job.agent_base)
         except Exception as e:
             logger.warning("PixInsight [job=%s]: Calib-Cache-Sync fehlgeschlagen (%s) — Legacy-Fallback", job.id, e)
             transfer = None
@@ -680,7 +702,7 @@ async def _do_batch_transfer(
                     job.id, zip_size / (1024 * 1024), len(zip_files))
 
         # ZIP an Mac-Agent hochladen (gestreamt von Platte)
-        agent_url = await _agent_url("/process")
+        agent_url = await _agent_url("/process", job.agent_base)
         logger.info(
             "PixInsight [job=%s]: sende ZIP (%.1f MB) an %s (mode=%s, flats=%s, darks=%s, bias=%s)",
             job.id, zip_size / (1024 * 1024), agent_url, mode,
@@ -753,7 +775,7 @@ async def _do_batch_transfer(
 
 
 async def trigger_batch(
-    db: AsyncSession, user: User, obs: Observation, *, mode: str = "wbpp"
+    db: AsyncSession, user: User, obs: Observation, *, mode: str = "wbpp", agent: str = "1"
 ) -> dict[str, Any]:
     """Startet den PixInsight-Batch für diese Observation — ASYNCHRON.
 
@@ -769,6 +791,9 @@ async def trigger_batch(
 
     if mode not in VALID_MODES:
         mode = "wbpp"
+    if agent not in {a["id"] for a in list_agents()}:
+        agent = "1"
+    agent_base = _agent_base_for(agent)
 
     # Calibration-Dir aus Setup holen
     calib_dirs = await _get_calibration_dirs(db, obs)
@@ -791,6 +816,8 @@ async def trigger_batch(
         obs_id=str(obs.id),
         user_id=str(user.id),
         status="starting",
+        agent_id=agent,
+        agent_base=agent_base,
         mode=mode,
         calibration_dir=calib_dirs.get("flats_dir", ""),
         flats_dir=calib_dirs.get("flats_dir", ""),
@@ -815,7 +842,8 @@ async def trigger_batch(
         "job_id": job.id,
         "status": "starting",
         "mode": mode,
-        "agent_url": _cfg.pixinsight_agent_url,
+        "agent": agent,
+        "agent_url": agent_base,
         "input_files": 0,  # wird im Hintergrund gefüllt
         "calibration_dir": calib_dirs.get("flats_dir") or None,
         "flats_dir": calib_dirs.get("flats_dir") or None,
@@ -848,7 +876,7 @@ async def _finalize_job(bjob: BackendJob) -> dict[str, Any]:
         try:
             async with httpx.AsyncClient(timeout=600.0) as client:
                 resp = await client.get(
-                    await _agent_url(f"/results/{bjob.agent_job_id}"),
+                    await _agent_url(f"/results/{bjob.agent_job_id}", bjob.agent_base),
                     params={"token": token},
                 )
                 if resp.status_code == 409:
@@ -893,7 +921,7 @@ async def _finalize_job(bjob: BackendJob) -> dict[str, Any]:
 
         # Agent-Job restlos aufräumen (Input + Output auf dem Mac löschen)
         if bjob.agent_job_id:
-            await _cleanup_agent_job(bjob.agent_job_id)
+            await _cleanup_agent_job(bjob.agent_job_id, bjob.agent_base)
 
         bjob.result = {
             "job_id": bjob.id,
@@ -936,7 +964,7 @@ async def poll_job_results(
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.get(
-                    await _agent_url(f"/status/{bjob.agent_job_id}"),
+                    await _agent_url(f"/status/{bjob.agent_job_id}", bjob.agent_base),
                     params={"token": token},
                 )
                 resp.raise_for_status()
@@ -995,7 +1023,7 @@ async def agent_poll_loop():
                 try:
                     async with httpx.AsyncClient(timeout=15.0) as client:
                         resp = await client.get(
-                            await _agent_url(f"/status/{bjob.agent_job_id}"),
+                            await _agent_url(f"/status/{bjob.agent_job_id}", bjob.agent_base),
                             params={"token": await _agent_token()},
                         )
                         resp.raise_for_status()
@@ -1083,7 +1111,7 @@ async def check_job_status(job_id: str) -> dict[str, Any]:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(
-                    await _agent_url(f"/status/{bjob.agent_job_id}"),
+                    await _agent_url(f"/status/{bjob.agent_job_id}", bjob.agent_base),
                     params={"token": await _agent_token()},
                 )
                 resp.raise_for_status()
@@ -1116,14 +1144,14 @@ async def check_job_status(job_id: str) -> dict[str, Any]:
     return {"status": bjob.status}
 
 
-async def check_agent_health() -> dict[str, Any]:
+async def check_agent_health(base: str | None = None) -> dict[str, Any]:
     """Health-Check des Mac-Agents."""
     if not _cfg.pixinsight_agent_url:
         return {"available": False, "reason": "nicht konfiguriert"}
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(await _agent_url("/health"))
+            resp = await client.get(await _agent_url("/health", base))
             resp.raise_for_status()
             data = resp.json()
             return {"available": True, **data}
@@ -1133,7 +1161,7 @@ async def check_agent_health() -> dict[str, Any]:
 
 # ─── Pre-Flight-Check ───
 async def precheck(
-    db: AsyncSession, user: User, obs: Observation
+    db: AsyncSession, user: User, obs: Observation, agent: str = "1"
 ) -> dict[str, Any]:
     """Pre-Flight-Check vor dem PixInsight-Batch.
 
@@ -1231,8 +1259,10 @@ async def precheck(
             "message": "Keine Calibration-Verzeichnisse für dieses Setup konfiguriert — Flats/Darks/Bias müssen im ZIP enthalten sein oder manuell in PixInsight geladen werden.",
         })
 
-    # 3. Agent-Health
-    agent = await check_agent_health()
+    # 3. Agent-Health (des GEWÄHLTEN Agents)
+    agent_base = _agent_base_for(agent)
+    agent_health = await check_agent_health(agent_base)
+    agent = agent_health  # Weiterverwendung unten unter dem alten Namen
     agent_info: dict[str, Any] = {
         "available": agent.get("available", False),
         "pixinsight_found": agent.get("pixinsight_found", False),
@@ -1241,12 +1271,19 @@ async def precheck(
         "wbpp_script_found": agent.get("wbpp_script_found", False),
         "fastbatch_script_found": agent.get("fastbatch_script_found", False),
         "active_jobs": agent.get("active_jobs", 0),
+        "work_dir_available": agent.get("work_dir_available", True),
     }
     if not agent.get("available"):
         errors.append({
             "level": "error",
             "code": "agent_unreachable",
-            "message": f"Mac-Agent nicht erreichbar unter {_cfg.pixinsight_agent_url} — ist der Agent auf dem Mac gestartet?",
+            "message": f"Agent nicht erreichbar unter {agent_base} — läuft er auf dem Rechner?",
+        })
+    elif agent.get("work_dir_available") is False:
+        errors.append({
+            "level": "error",
+            "code": "workdir_unavailable",
+            "message": agent.get("work_dir_error") or "Work-Dir des Agents nicht verfügbar (NAS-Volume nicht verbunden?).",
         })
     elif not agent.get("pixinsight_found") and not agent.get("shell_sim_available"):
         errors.append({

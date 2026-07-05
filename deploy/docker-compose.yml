@@ -55,6 +55,7 @@ services:
     # kann auf http://mac-agent:7777 gesetzt werden.
     extra_hosts:
       - "mac-agent:${MAC_AGENT_IP:-host-gateway}"
+      - "win-agent:${WIN_AGENT_IP:-host-gateway}"
     depends_on:
       db: { condition: service_healthy }
     networks: [curastro-net]

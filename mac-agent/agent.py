@@ -47,6 +47,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import uuid
 import zipfile
 from dataclasses import dataclass, field, asdict
@@ -79,11 +80,14 @@ for _uv_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 # ─── Konfiguration (Umgebungsvariablen) ───
+IS_WINDOWS = sys.platform == "win32"
+
 AGENT_PORT = int(os.environ.get("AGENT_PORT", "7777"))
 AGENT_TOKEN = os.environ.get("AGENT_TOKEN", "")
 PIXINSIGHT_BIN = os.environ.get(
     "PIXINSIGHT_BIN",
-    "/Applications/PixInsight/PixInsight.app/Contents/MacOS/PixInsight",
+    r"C:\Program Files\PixInsight\bin\PixInsight.exe" if IS_WINDOWS
+    else "/Applications/PixInsight/PixInsight.app/Contents/MacOS/PixInsight",
 )
 BATCH_SCRIPT = os.environ.get(
     "BATCH_SCRIPT",
@@ -100,24 +104,42 @@ CALIB_CACHE_DIR = Path(os.environ.get("CALIB_CACHE_DIR", str(WORK_DIR / "calib-c
 CALIB_CACHE_MAX_GB = float(os.environ.get("CALIB_CACHE_MAX_GB", "20"))
 
 def _required_volume(path: Path) -> Path | None:
-    """Liegt der Pfad auf einem externen Volume (/Volumes/<Name>/…), liefert
-    das Volume-Root — sonst None (lokaler Pfad, immer verfügbar)."""
-    parts = Path(path).parts
+    """Liegt der Pfad auf einem externen Volume, liefert dessen Root —
+    sonst None (lokaler Pfad, immer verfügbar).
+
+    macOS:  /Volumes/<Name>/…       → /Volumes/<Name>
+    Windows: Z:\\… (nicht C:) oder \\\\server\\share\\… → Laufwerks-/Share-Root
+    """
+    p = Path(path)
+    if IS_WINDOWS:
+        anchor = p.anchor  # z. B. 'Z:\\' oder '\\\\nas\\Fotos\\'
+        if anchor and not anchor.lower().startswith("c:"):
+            return Path(anchor)
+        return None
+    parts = p.parts
     if len(parts) >= 3 and parts[0] == "/" and parts[1] == "Volumes":
         return Path("/Volumes") / parts[2]
     return None
 
 
+def _volume_present(vol: Path) -> bool:
+    if IS_WINDOWS:
+        # Getrenntes Netzlaufwerk/UNC: exists() schlägt fehl.
+        return os.path.exists(str(vol))
+    # macOS: exists() reicht NICHT — ein nicht gemountetes Volume wäre ein
+    # stiller lokaler Ordner unter /Volumes. ismount ist die Wahrheit.
+    return os.path.ismount(str(vol))
+
+
 def _workdir_available() -> tuple[bool, str]:
     """Prüft, ob das Work-Dir wirklich beschreibbar verfügbar ist.
 
-    Kritisch bei WORK_DIR auf dem NAS: ist das SMB-Volume NICHT gemountet,
-    würde mkdir unter /Volumes/<Name>/ still einen lokalen Ordner anlegen
-    und die Mac-Platte volllaufen lassen — genau das verhindern wir."""
+    Kritisch bei WORK_DIR auf dem NAS: ist das Volume/Laufwerk NICHT
+    verbunden, würde sonst still auf die lokale Platte geschrieben."""
     for p in (WORK_DIR, CALIB_CACHE_DIR):
         vol = _required_volume(p)
-        if vol is not None and not os.path.ismount(vol):
-            return False, f"NAS-Volume nicht gemountet: {vol} (benötigt für {p})"
+        if vol is not None and not _volume_present(vol):
+            return False, f"NAS-Volume/Laufwerk nicht verbunden: {vol} (benötigt für {p})"
     return True, ""
 
 
@@ -260,6 +282,12 @@ def _check_token(token: str) -> None:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _js_path(p) -> str:
+    """Pfad für PJSR (cura_batch.js): PixInsight versteht auf allen
+    Plattformen Forward-Slashes — Windows-Backslashes normalisieren."""
+    return str(p).replace("\\", "/")
 
 
 def _zip_directory(src_dir: Path, zip_path: Path) -> int:
@@ -538,11 +566,40 @@ def _print_batch_log(output_dir: Path) -> None:
             pass
 
 
+def _pixinsight_running() -> bool:
+    """Läuft PixInsight gerade (GUI oder hängengebliebener Prozess)?"""
+    try:
+        if IS_WINDOWS:
+            r = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq PixInsight.exe"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return "PixInsight.exe" in (r.stdout or "")
+        r = subprocess.run(
+            ["pgrep", "-f", "PixInsight"],
+            capture_output=True, text=True, timeout=5,
+        )
+        pids = [p.strip() for p in r.stdout.strip().split("\n") if p.strip()]
+        return any(p != str(os.getpid()) for p in pids)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _kill_existing_pixinsight() -> None:
     """Killt alle laufenden PixInsight-Prozesse vor einem headless-Batch.
     Verhindert 'Yielded execution to running instance' — das Skript wuerde
     sonst an eine bestehende Instanz delegiert und nie ausgefuehrt."""
+    import time
     try:
+        if IS_WINDOWS:
+            if _pixinsight_running():
+                log.info('  Beende laufende PixInsight.exe (taskkill) …')
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", "PixInsight.exe"],
+                    capture_output=True, timeout=10,
+                )
+                time.sleep(2)
+            return
         result = subprocess.run(
             ['pgrep', '-f', 'PixInsight'],
             capture_output=True, text=True, timeout=5,
@@ -558,10 +615,9 @@ def _kill_existing_pixinsight() -> None:
                     subprocess.run(['kill', '-9', pid], timeout=5)
                 except Exception:
                     pass
-            import time
             time.sleep(2)
     except FileNotFoundError:
-        pass  # pgrep nicht verfuegbar (nicht macOS)
+        pass  # pgrep nicht verfuegbar
     except Exception as e:
         log.warning('  Konnte PixInsight-Prozesse nicht killen: %s', e)
 
@@ -592,8 +648,8 @@ async def _run_pixinsight(job: Job) -> None:
         wrapper_path = Path(job.work_input).parent / f"{job.id}_wrapper.js"
         batch_source = Path(batch_script).read_text()
         wrapper_js = (
-            "var CURA_INPUT_DIR = " + json.dumps(job.work_input) + ";\n"
-            + "var CURA_OUTPUT_DIR = " + json.dumps(job.work_output) + ";\n"
+            "var CURA_INPUT_DIR = " + json.dumps(_js_path(job.work_input)) + ";\n"
+            + "var CURA_OUTPUT_DIR = " + json.dumps(_js_path(job.work_output)) + ";\n"
             + "var CURA_MODE = " + json.dumps(job.mode) + ";\n"
             + "var CURA_FRAME_INFO = " + json.dumps(job.frame_info) + ";\n"
             + "var CURA_CALIB = " + json.dumps(job.calib_paths or {}) + ";\n"
@@ -609,7 +665,7 @@ async def _run_pixinsight(job: Job) -> None:
         cmd = [
             PIXINSIGHT_BIN,
             "-n",                       # Neue Instanz erzwingen (kein Yielding)
-            f"-r={wrapper_path}",
+            f"-r={_js_path(wrapper_path)}",
             "--force-exit",
         ]
 
@@ -722,17 +778,7 @@ async def health():
     pixinsight_ok = Path(PIXINSIGHT_BIN).exists()
     script_ok = Path(BATCH_SCRIPT).exists()
     # Pruefen, ob PixInsight bereits laeuft (GUI oder hängengebliebener Prozess)
-    pixinsight_running = False
-    try:
-        result = subprocess.run(
-            ["pgrep", "-f", "PixInsight"],
-            capture_output=True, text=True, timeout=5,
-        )
-        pids = [p.strip() for p in result.stdout.strip().split("\n") if p.strip()]
-        pids = [p for p in pids if p != str(os.getpid())]
-        pixinsight_running = len(pids) > 0
-    except Exception:
-        pass
+    pixinsight_running = _pixinsight_running()
     wd_ok, wd_msg = _workdir_available()
     return {
         "status": "ok" if pixinsight_ok and script_ok and wd_ok else "degraded",
@@ -842,7 +888,7 @@ def _resolve_calib(calib_json: str) -> dict[str, Any]:
         if p is None:
             raise HTTPException(409, f"Calib-Datei fehlt im Cache: {sha[:16]}… — erst /calib/upload")
         p.touch()
-        return str(p)
+        return _js_path(p)
 
     resolved = {
         "masterBias": resolve(calib.get("master_bias")),

@@ -41,6 +41,7 @@ async def _owned_obs(db: AsyncSession, user: User, obs_id: str) -> Observation:
 
 class ProcessRequest(BaseModel):
     mode: str = "wbpp"  # wbpp · fastbatch · shell_sim
+    agent: str = "1"    # 1 = primärer Agent, 2 = zweiter (z. B. Windows)
 
 
 class PollRequest(BaseModel):
@@ -50,17 +51,18 @@ class PollRequest(BaseModel):
 @router.get("/api/observations/{obs_id}/precheck")
 async def precheck(
     obs_id: str,
+    agent: str = "1",
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Pre-Flight-Check vor dem PixInsight-Batch.
 
     Prüft Sub-Frames (Lights/Darks/Flats/Bias), Calibration-Dir,
-    Mac-Agent-Erreichbarkeit und liefert Warnungen/Errors sowie
-    ein ``can_start`` Flag.
+    Erreichbarkeit des GEWÄHLTEN Agents und liefert Warnungen/Errors
+    sowie ein ``can_start`` Flag.
     """
     obs = await _owned_obs(db, user, obs_id)
-    return await pixinsight.precheck(db, user, obs)
+    return await pixinsight.precheck(db, user, obs, agent=agent)
 
 
 @router.post("/api/observations/{obs_id}/process")
@@ -84,8 +86,9 @@ async def trigger_processing(
     """
     obs = await _owned_obs(db, user, obs_id)
     mode = body.mode if body else "wbpp"
+    agent = body.agent if body else "1"
     try:
-        result = await pixinsight.trigger_batch(db, user, obs, mode=mode)
+        result = await pixinsight.trigger_batch(db, user, obs, mode=mode, agent=agent)
         await db.commit()
         return result
     except ValueError as e:
@@ -129,6 +132,14 @@ async def poll_results(
 async def get_job_status(job_id: str, user: User = Depends(get_current_user)):
     """Fragt den Status eines PixInsight-Jobs vom Mac-Agent ab."""
     return await pixinsight.check_job_status(job_id)
+
+
+@router.get("/api/pixinsight/agents")
+async def list_agents(user: User = Depends(get_current_user)):
+    """Konfigurierte PixInsight-Agents (für die Auswahl im Batch-Dialog)."""
+    return {"agents": [
+        {"id": a["id"], "name": a["name"]} for a in pixinsight.list_agents()
+    ]}
 
 
 @router.get("/api/pixinsight/jobs")
