@@ -85,7 +85,7 @@ export default function Slideshow({ onClose }: { onClose: () => void }) {
       ) : n === 0 ? (
         <div className="flex flex-col items-center gap-3 text-slate-400">
           <ImageOff className="h-10 w-10" />
-          <p>Keine bewerteten Fotos (Rating ≥ 3) vorhanden.</p>
+          <p>Keine finalen Ergebnisse markiert — setze im Ergebnis-Fenster das Häkchen „Final (Slideshow)".</p>
           <button onClick={onClose} className="mt-2 rounded-lg border border-white/15 px-4 py-2 text-sm text-slate-200 hover:bg-white/10">Schließen</button>
         </div>
       ) : (

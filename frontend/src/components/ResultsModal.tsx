@@ -3,13 +3,14 @@ import {
   X, Upload, Trash2, Download, Loader2, FolderSearch, ImageOff,
   CheckCircle2, Radio, AlertTriangle, Cpu, Clock, RefreshCw, FileCheck2,
   Activity, Files, HardDrive, Wifi, WifiOff, Layers, Zap,
+  ChevronLeft, ChevronRight,
 } from 'lucide-react'
 import api from '../services/api'
 import AuthImage from './AuthImage'
 
 interface Res {
   id: string; filename: string; file_size: number | null; width: number | null; height: number | null
-  source: string | null; created_at: string | null; preview_url: string; download_url: string
+  source: string | null; is_final: boolean; created_at: string | null; preview_url: string; download_url: string
 }
 
 type PiStatus = 'idle' | 'prechecking' | 'ready' | 'starting' | 'running' | 'polling' | 'done' | 'error'
@@ -54,6 +55,10 @@ export default function ResultsModal({
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState('')
   const [err, setErr] = useState('')
+  // Fullscreen-Viewer (analog Subs-Triage): Index in items, null = zu.
+  const [fsIdx, setFsIdx] = useState<number | null>(null)
+  const fsIdxRef = useRef<number | null>(null)
+  fsIdxRef.current = fsIdx
 
   // PixInsight-Batch-Status
   const [piStatus, setPiStatus] = useState<PiStatus>('idle')
@@ -95,7 +100,10 @@ export default function ResultsModal({
   }, [])
 
   useEffect(() => {
-    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    const h = (e: KeyboardEvent) => {
+      // Fullscreen offen → ESC schließt nur den Viewer, nicht das Modal.
+      if (e.key === 'Escape' && fsIdxRef.current === null) onClose()
+    }
     window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h)
   }, [onClose])
 
@@ -241,6 +249,32 @@ export default function ResultsModal({
   }
 
   const del = async (id: string) => { await api.delete(`/api/observations/${observationId}/results/${id}`); load(); onChanged() }
+
+  // ─── Final-Markierung (Häkchen): nur finale Bilder erscheinen in der Slideshow ───
+  const toggleFinal = async (it: Res) => {
+    const next = !it.is_final
+    setItems((arr) => arr.map((x) => (x.id === it.id ? { ...x, is_final: next } : x)))  // optimistisch
+    try {
+      await api.patch(`/api/observations/${observationId}/results/${it.id}`, { is_final: next })
+    } catch {
+      setItems((arr) => arr.map((x) => (x.id === it.id ? { ...x, is_final: !next } : x)))  // zurückrollen
+    }
+  }
+
+  // ─── Fullscreen-Viewer: ←/→ blättern (Loop), F = Final-Häkchen, ESC = zu ───
+  useEffect(() => {
+    if (fsIdx === null) return
+    const h = (e: KeyboardEvent) => {
+      const n = items.length
+      if (!n) return
+      if (e.key === 'Escape') { e.stopPropagation(); setFsIdx(null) }
+      else if (e.key === 'ArrowRight') setFsIdx((i) => ((i ?? 0) + 1) % n)
+      else if (e.key === 'ArrowLeft') setFsIdx((i) => ((i ?? 0) - 1 + n) % n)
+      else if (e.key === 'f' || e.key === 'F') { const it = items[fsIdx]; if (it) toggleFinal(it) }
+    }
+    window.addEventListener('keydown', h, true)  // capture: vor dem Modal-ESC-Handler
+    return () => window.removeEventListener('keydown', h, true)
+  }, [fsIdx, items]) // eslint-disable-line
 
   const fileRef = useRef<HTMLInputElement>(null)
 
@@ -564,14 +598,16 @@ export default function ResultsModal({
             <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-slate-400" /></div>
           ) : items.length === 0 ? (
             <div className="flex flex-col items-center gap-2 py-8 text-slate-500"><ImageOff className="h-7 w-7" /><span className="text-sm">Noch kein Ergebnis.</span></div>
-          ) : items.map((it) => (
-            <div key={it.id} className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-3 sm:flex-row">
-              <AuthImage src={it.preview_url} alt={it.filename} className="h-44 w-full rounded-lg object-contain sm:w-64" />
+          ) : items.map((it, idx) => (
+            <div key={it.id} className={`flex flex-col gap-3 rounded-xl border p-3 sm:flex-row ${it.is_final ? 'border-amber-400/50 bg-amber-500/5' : 'border-white/10 bg-white/5'}`}>
+              <button onClick={() => setFsIdx(idx)} title="Vollbild öffnen" className="cursor-zoom-in">
+                <AuthImage src={it.preview_url} alt={it.filename} className="h-44 w-full rounded-lg object-contain sm:w-64" />
+              </button>
               <div className="min-w-0 flex-1">
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
                     <div className="truncate font-medium">{it.filename}</div>
-                    <div className="mt-0.5 flex items-center gap-2 text-xs text-slate-500">
+                    <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-slate-500">
                       {it.width && it.height ? <span>{it.width}×{it.height}</span> : null}
                       <span>{fmtSize(it.file_size)}</span>
                       <span className="flex items-center gap-1 rounded-full bg-white/10 px-1.5">
@@ -580,6 +616,12 @@ export default function ResultsModal({
                           : <><CheckCircle2 className="h-3 w-3" /> Upload</>}
                       </span>
                     </div>
+                    <label className={`mt-2 inline-flex cursor-pointer items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition ${
+                      it.is_final ? 'border-amber-400/50 bg-amber-500/15 text-amber-200' : 'border-white/10 text-slate-400 hover:bg-white/5'
+                    }`} title="Fertiges Endergebnis — nur finale Bilder erscheinen in der Slideshow">
+                      <input type="checkbox" checked={it.is_final} onChange={() => toggleFinal(it)} className="h-3.5 w-3.5 accent-amber-500" />
+                      Final (Slideshow)
+                    </label>
                   </div>
                   <div className="flex gap-1">
                     <button onClick={() => download(it)} title="Herunterladen" className="rounded-lg p-1.5 text-slate-300 hover:bg-white/10"><Download className="h-4 w-4" /></button>
@@ -591,6 +633,54 @@ export default function ResultsModal({
           ))}
         </div>
       </div>
+
+      {/* ─── Fullscreen-Viewer (analog Subs-Triage) ─── */}
+      {fsIdx !== null && items[fsIdx] && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black" onClick={(e) => { e.stopPropagation(); setFsIdx(null) }}>
+          <AuthImage
+            key={items[fsIdx].id}
+            src={items[fsIdx].preview_url}
+            alt={items[fsIdx].filename}
+            className="max-h-full max-w-full object-contain"
+          />
+
+          {/* Kopfzeile */}
+          <div className="absolute inset-x-0 top-0 flex items-center justify-between gap-3 bg-gradient-to-b from-black/80 to-transparent px-5 pb-10 pt-4" onClick={(e) => e.stopPropagation()}>
+            <div className="min-w-0">
+              <div className="truncate text-sm font-medium text-white">{items[fsIdx].filename}</div>
+              <div className="text-xs text-slate-400">{fsIdx + 1} / {items.length}</div>
+            </div>
+            <div className="flex items-center gap-2">
+              <label className={`flex cursor-pointer items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs transition ${
+                items[fsIdx].is_final ? 'border-amber-400/60 bg-amber-500/20 text-amber-200' : 'border-white/20 text-slate-300 hover:bg-white/10'
+              }`}>
+                <input type="checkbox" checked={items[fsIdx].is_final} onChange={() => toggleFinal(items[fsIdx])} className="h-3.5 w-3.5 accent-amber-500" />
+                Final (Slideshow)
+              </label>
+              <button onClick={() => setFsIdx(null)} className="rounded-full bg-white/10 p-2 text-white hover:bg-white/20"><X className="h-5 w-5" /></button>
+            </div>
+          </div>
+
+          {/* Navigation (Loop) */}
+          {items.length > 1 && (
+            <>
+              <button
+                onClick={(e) => { e.stopPropagation(); setFsIdx((i) => ((i ?? 0) - 1 + items.length) % items.length) }}
+                className="absolute left-3 top-1/2 -translate-y-1/2 rounded-full bg-white/10 p-3 text-white hover:bg-white/20"
+              ><ChevronLeft className="h-7 w-7" /></button>
+              <button
+                onClick={(e) => { e.stopPropagation(); setFsIdx((i) => ((i ?? 0) + 1) % items.length) }}
+                className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full bg-white/10 p-3 text-white hover:bg-white/20"
+              ><ChevronRight className="h-7 w-7" /></button>
+            </>
+          )}
+
+          {/* Fußzeile: Tasten-Hinweise */}
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent px-5 pb-4 pt-10 text-center text-xs text-slate-400">
+            ← / → blättern · F = Final · ESC schließen
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTask
@@ -55,10 +56,30 @@ def _out(r: ResultFile) -> dict:
     return {
         "id": str(r.id), "filename": r.filename, "file_size": r.file_size,
         "width": r.width, "height": r.height, "source": r.source,
+        "is_final": bool(r.is_final),
         "created_at": r.created_at.isoformat() if r.created_at else None,
         "preview_url": f"/api/results/{r.id}/preview",
         "download_url": f"/api/results/{r.id}/download",
     }
+
+
+class ResultPatch(BaseModel):
+    is_final: bool | None = None
+
+
+@router.patch("/api/observations/{obs_id}/results/{rid}")
+async def patch_result(
+    obs_id: str, rid: str, body: ResultPatch,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """Ergebnis-Eigenschaften setzen — aktuell die Final-Markierung
+    (Häkchen: dieses Bild ist ein fertiges Endergebnis → Slideshow)."""
+    await _owned_obs(db, user, obs_id)
+    r = await _owned_result(db, user, rid)
+    if body.is_final is not None:
+        r.is_final = body.is_final
+    await db.flush()
+    return _out(r)
 
 
 @router.get("/api/observations/{obs_id}/results")

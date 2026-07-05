@@ -7,7 +7,7 @@ Eine JPG-Vorschau wird lokal gecacht (outputs/resultprev)."""
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -33,4 +33,7 @@ class ResultFile(Base):
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
     source: Mapped[str | None] = mapped_column(String(16), nullable=True)  # upload | watch | batch
+    # Final-Markierung (Häkchen im UI): DAS fertige Bild / die fertigen Bilder
+    # der Aufnahme — nur diese erscheinen in der Slideshow.
+    is_final: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
