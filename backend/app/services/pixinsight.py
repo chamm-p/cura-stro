@@ -1002,6 +1002,10 @@ async def poll_job_results(
         except httpx.ConnectError:
             return {"job_id": job_id, "status": "unknown", "error": "Agent nicht erreichbar"}
         except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                bjob.status = "failed"
+                bjob.error = "Agent kennt den Job nicht mehr (Agent-Neustart?) — bitte neu anstoßen."
+                return {"job_id": job_id, "status": "failed", "error": bjob.error}
             return {"job_id": job_id, "status": "error", "error": f"Agent: {e.response.status_code}"}
 
         agent_status = status_data.get("status", "unknown")
@@ -1056,10 +1060,31 @@ async def agent_poll_loop():
                             await _agent_url(f"/status/{bjob.agent_job_id}", bjob.agent_base),
                             params={"token": await _agent_token()},
                         )
-                        resp.raise_for_status()
-                        status_data = resp.json()
                 except Exception:
                     continue  # Agent gerade nicht erreichbar — nächste Runde
+
+                if resp.status_code == 404:
+                    # Der Agent kennt den Job nicht mehr — er hält Jobs nur im
+                    # RAM, also ist er nach einem Agent-Neustart weg. Terminal
+                    # behandeln, sonst pollt die Queue alle 20 s bis in alle
+                    # Ewigkeit (Log-Spam + Job hängt für immer auf 'sent').
+                    bjob.status = "failed"
+                    bjob.error = "Agent kennt den Job nicht mehr (Agent-Neustart?) — bitte neu anstoßen."
+                    logger.warning("PixInsight-Queue: Job %s auf dem Agent verschwunden (404) → failed", bjob.id[:8])
+                    try:
+                        async with async_session() as db:
+                            obs = await db.get(Observation, uuid.UUID(bjob.obs_id))
+                            if obs and obs.status == "in_bearbeitung":
+                                obs.status = "raw"
+                                await db.commit()
+                    except Exception:
+                        pass
+                    continue
+                try:
+                    resp.raise_for_status()
+                    status_data = resp.json()
+                except Exception:
+                    continue
 
                 agent_status = status_data.get("status", "unknown")
                 if agent_status == "running":
@@ -1154,6 +1179,10 @@ async def check_job_status(job_id: str) -> dict[str, Any]:
         except httpx.ConnectError:
             return {"status": "unknown", "error": "Agent nicht erreichbar"}
         except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                bjob.status = "failed"
+                bjob.error = "Agent kennt den Job nicht mehr (Agent-Neustart?) — bitte neu anstoßen."
+                return {"status": "failed", "error": bjob.error}
             return {"status": "error", "error": f"Agent: {e.response.status_code}"}
 
         agent_status = agent_data.get("status", "unknown")
