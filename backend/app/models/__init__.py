@@ -1,6 +1,7 @@
 """ORM-Modelle. Hier importieren, damit Alembic-Autogenerate sie sieht."""
 
 from app.models.asiair import AsiairRig  # noqa: F401
+from app.models.calib import CalibFile, CalibMaster  # noqa: F401
 from app.models.catalog import CatalogObject  # noqa: F401
 from app.models.cloud_forecast import CloudForecast  # noqa: F401
 from app.models.image import Image  # noqa: F401
@@ -13,6 +14,8 @@ from app.models.user import AuthMethod, User, UserRole  # noqa: F401
 
 __all__ = [
     "User",
+    "CalibFile",
+    "CalibMaster",
     "UserRole",
     "AuthMethod",
     "Location",

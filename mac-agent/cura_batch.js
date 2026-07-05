@@ -23,12 +23,19 @@ var inputDir = "";
 var outputDir = "";
 var mode = "fastbatch";
 var frameInfo = {};
+// Calib aus dem Agent-Cache: { masterBias, masterDark, masterFlat (Pfad
+// oder ""), biasSubs, darkSubs, flatSubs (Pfad-Arrays) }. Leer = Legacy-
+// Modus (Calib liegt mit im Input-Verzeichnis).
+var calib = {};
 
 if (typeof CURA_INPUT_DIR !== "undefined") {
     inputDir  = CURA_INPUT_DIR;
     outputDir = CURA_OUTPUT_DIR;
     mode      = CURA_MODE;
     frameInfo = CURA_FRAME_INFO;
+}
+if (typeof CURA_CALIB !== "undefined" && CURA_CALIB) {
+    calib = CURA_CALIB;
 }
 
 if (inputDir.length === 0 || outputDir.length === 0) {
@@ -286,9 +293,33 @@ function buildMaster(frames, label, outPath, normalize) {
     return outPath;
 }
 
-masterBias = buildMaster(biases, "Bias", calDir + "/master_bias.xisf", false);
-masterDark = buildMaster(darks, "Dark", calDir + "/master_dark.xisf", false);
-masterFlat = buildMaster(flats, "Flat", calDir + "/master_flat.xisf", true);
+// Calib-Quellen (Priorität): 1) fertiger Master aus dem Agent-Cache,
+// 2) Roh-Subs aus dem Agent-Cache, 3) Legacy: Frames im Input-Verzeichnis.
+// Neu gebaute Master landen in calDir → Ergebnis-ZIP → das Backend legt
+// sie aufs NAS (Calib/Masters/) und schickt beim nächsten Mal nur noch sie.
+var biasSubs = (calib.biasSubs && calib.biasSubs.length) ? calib.biasSubs : biases;
+var darkSubs = (calib.darkSubs && calib.darkSubs.length) ? calib.darkSubs : darks;
+var flatSubs = (calib.flatSubs && calib.flatSubs.length) ? calib.flatSubs : flats;
+
+if (calib.masterBias) {
+    masterBias = calib.masterBias;
+    flog("Bias-Master aus Cache: " + masterBias);
+} else {
+    masterBias = buildMaster(biasSubs, "Bias", calDir + "/master_bias.xisf", false);
+}
+if (calib.masterDark) {
+    masterDark = calib.masterDark;
+    flog("Dark-Master aus Cache: " + masterDark);
+} else {
+    masterDark = buildMaster(darkSubs, "Dark", calDir + "/master_dark.xisf", false);
+}
+if (calib.masterFlat) {
+    masterFlat = calib.masterFlat;
+    flog("Flat-Master aus Cache: " + masterFlat);
+} else {
+    masterFlat = buildMaster(flatSubs, "Flat", calDir + "/master_flat.xisf", true);
+}
+flush();
 
 // ─── 2. ImageCalibration ───
 flog("\n--- ImageCalibration ---");

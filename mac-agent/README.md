@@ -115,6 +115,16 @@ Umgebungsvariablen (direkt beim Start oder in einer `.env`-Datei neben `agent.py
 | `FASTBATCH_SCRIPT` | `…/FastBatchProcessing.js` | Pfad zum FastBatch-Skript |
 | `WORK_DIR` | `~/cura-stro-jobs` | Temporäres Arbeitsverzeichnis |
 | `MAX_CONCURRENT` | `1` | Maximal gleichzeitige PixInsight-Prozesse |
+| `CALIB_CACHE_DIR` | `~/cura-stro-jobs/calib-cache` | Persistenter Calib-Cache (content-adressiert per SHA-256) |
+| `CALIB_CACHE_MAX_GB` | `20` | Cache-Limit — älteste Dateien werden per LRU verdrängt |
+
+**Calib-Cache:** Kalibrier-Frames/-Master werden vom Backend nur einmal
+hochgeladen (`POST /calib/check` → `POST /calib/upload`) und danach aus dem
+Cache wiederverwendet. Fertige Bias/Dark/Flat-Master wandern nach dem ersten
+Batch zurück aufs NAS (`Calib/Masters/`) — Folgejobs übertragen statt z. B.
+60 Roh-Subs nur noch bis zu 3 Master-Dateien. Der Cache darf jederzeit
+gelöscht werden; fehlende Dateien werden beim nächsten Job automatisch neu
+übertragen.
 
 ### 5. Start
 

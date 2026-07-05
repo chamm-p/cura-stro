@@ -4,13 +4,18 @@ Der Mac-Agent (mac-agent/agent.py) läuft auf dem Mac, auf dem PixInsight
 installiert ist. Der Mac braucht **keinen SMB-Mount** — alle Dateien werden
 über HTTP transferiert:
 
-    1. Backend liest RAW-Dateien vom NAS (Storage-Abstraktion)
-    2. Backend zippt die RAW-Dateien in ein temporäres Verzeichnis
-    3. Backend lädt das ZIP per multipart-POST an den Mac-Agent hoch
-    4. Mac-Agent entpackt, startet PixInsight/WBPP headless (oder Shell-Sim)
-    5. Mac-Agent zippt die Ergebnisse
+    1. Backend liest RAW-Lights vom NAS (Storage-Abstraktion)
+    2. Calib (Flats/Darks/Bias): Fingerprint je Datei (SHA-256, DB-Cache) →
+       existiert für das Set schon ein Master auf dem NAS (Calib/Masters/),
+       wird nur der referenziert — sonst die Roh-Subs
+    3. Cache-Handshake mit dem Agent: POST /calib/check → nur fehlende
+       Dateien werden per /calib/upload übertragen (jede genau einmal)
+    4. Lights als ZIP (ZIP_STORED, von Platte gestreamt) per POST /process
+    5. Mac-Agent startet PixInsight headless (cura_batch.js, CURA_CALIB
+       zeigt auf die Cache-Pfade)
     6. Backend lädt Ergebnis-ZIP per GET /results/{job_id} herunter
-    7. Backend entpackt und schreibt auf NAS unter Prepared/<Obj>/<Ger>/
+    7. Frisch gebaute Bias/Dark/Flat-Master → NAS Calib/Masters/ + DB-
+       Registrierung (CalibMaster); Rest → Prepared/<Obj>/<Ger>/
     8. Status → 'vorbereitet' (WBPP fertig, manuelle Entwicklung offen)
 
 Der Nutzer kann dann in PixInsight manuell weiterarbeiten und das fertige
@@ -39,6 +44,7 @@ Architektur (asynchron):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import logging
@@ -57,6 +63,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import async_session
+from app.models.calib import CalibFile, CalibMaster
 from app.models.observation import Observation
 from app.models.observing import Setup
 from app.models.subframe import SubFrame
@@ -69,6 +76,17 @@ _cfg = get_settings()
 # Verzeichnisname für WBPP-Ergebnisse (Master-Files, kalibrierte Frames).
 # Liegen im Archiv unter Prepared/<Objekt>/<Gerät>/.
 PREPARED_FOLDER = "Prepared"
+
+# Fertige Kalibrier-Master (Bias/Dark/Flat) landen hier auf dem NAS und
+# werden bei Folgejobs statt der Roh-Subs an den Agent geschickt.
+CALIB_MASTERS_FOLDER = "Calib/Masters"
+
+# Reihenfolge: (kind, Setup-Feld, Dateiname den cura_batch.js erzeugt)
+CALIB_KINDS = [
+    ("bias", "bias_dir", "master_bias.xisf"),
+    ("dark", "darks_dir", "master_dark.xisf"),
+    ("flat", "flats_dir", "master_flat.xisf"),
+]
 
 # Gültige Processing-Modi
 VALID_MODES = {"wbpp", "fastbatch", "shell_sim"}
@@ -94,6 +112,10 @@ class BackendJob:
     bias_dir: str = ""
     frame_info: dict[str, Any] = field(default_factory=dict)
     created_at: str = ""
+    # Calib-Cache: set_hash je Art (für Master-Registrierung nach dem Job)
+    # und Transfer-Statistik (im Cache vorhanden vs. hochgeladen).
+    calib_set_hashes: dict[str, str] = field(default_factory=dict)
+    calib_transfer: dict[str, Any] | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -197,10 +219,13 @@ def _rel_from_archive_path(storage: archive.Storage, sub: SubFrame) -> str:
 
 
 async def _collect_raw_files(
-    db: AsyncSession, user: User, obs: Observation
-) -> list[tuple[str, bytes]]:
-    """Liest alle RAW-Dateien einer Observation vom Storage und liefert
-    (filename, content) Paare."""
+    db: AsyncSession, user: User, obs: Observation, dest_dir: Path
+) -> list[tuple[str, str]]:
+    """Liest alle RAW-Dateien einer Observation vom Storage in ein lokales
+    Temp-Verzeichnis und liefert (filename, lokaler Pfad) Paare.
+
+    Bewusst NICHT in den RAM (waren vorher (filename, bytes)-Paare):
+    30 Subs ≈ 300+ MB, die sonst doppelt gepuffert würden."""
     storage = archive.get_storage(user)
     subs = await db.scalars(
         select(SubFrame).where(SubFrame.observation_id == obs.id)
@@ -211,8 +236,9 @@ async def _collect_raw_files(
 
     storage_kind = getattr(storage, "kind", "unknown")
     storage_root = storage.display_root()
+    dest_dir.mkdir(parents=True, exist_ok=True)
 
-    files: list[tuple[str, bytes]] = []
+    files: list[tuple[str, str]] = []
     errors: list[str] = []
     for sub in subs:
         if not sub.archive_path:
@@ -220,22 +246,17 @@ async def _collect_raw_files(
             logger.warning("PixInsight: %s — kein archive_path", sub.original_filename)
             continue
         rel = _rel_from_archive_path(storage, sub)
-        tmp_path = None
+        local = dest_dir / sub.original_filename
         try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=Path(sub.original_filename).suffix) as tmp:
-                tmp_path = tmp.name
-            await asyncio.to_thread(storage.fetch, rel, tmp_path)
-            with open(tmp_path, "rb") as f:
-                content = f.read()
-            files.append((sub.original_filename, content))
-            logger.info("PixInsight: RAW gelesen — %s (%d bytes, rel=%s)", sub.original_filename, len(content), rel)
+            await asyncio.to_thread(storage.fetch, rel, str(local))
+            files.append((sub.original_filename, str(local)))
+            logger.info("PixInsight: RAW gelesen — %s (%d bytes, rel=%s)",
+                        sub.original_filename, local.stat().st_size, rel)
         except Exception as e:
+            local.unlink(missing_ok=True)
             err_msg = f"{sub.original_filename}: {e} (archive_path={sub.archive_path}, rel={rel}, storage={storage_kind}, root={storage_root})"
             errors.append(err_msg)
             logger.warning("PixInsight: Konnte RAW-Datei nicht lesen — %s", err_msg)
-        finally:
-            if tmp_path:
-                Path(tmp_path).unlink(missing_ok=True)
 
     if not files and errors:
         first_err = errors[0]
@@ -246,50 +267,185 @@ async def _collect_raw_files(
     return files
 
 
-async def _collect_calibration_files(
-    db: AsyncSession, user: User, obs: Observation, calib_dirs: dict[str, str]
-) -> list[tuple[str, bytes]]:
-    """Liest Kalibrierungs-Frames (Flats/Darks/Bias) vom NAS (Storage) und
-    liefert (filename, content) Paare. Die Pfade in calib_dirs sind relativ
-    zum Archiv-Root."""
+def _sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1024 * 1024):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _clean_rel(rel_dir: str, name: str) -> str:
+    return "/".join(p for p in (rel_dir + "/" + name).replace("\\", "/").split("/") if p)
+
+
+async def _hash_calib_dir(
+    db: AsyncSession, storage, user: User, rel_dir: str, tmpdir: str
+) -> list[dict[str, Any]]:
+    """Fingerprints für alle Dateien eines Calib-Verzeichnisses auf dem NAS.
+
+    Nutzt den DB-Cache (CalibFile): solange Größe+mtime unverändert sind,
+    wird der gespeicherte SHA-256 verwendet — sonst wird die Datei einmal
+    geholt und gehasht (die lokale Kopie bleibt im tmpdir für einen evtl.
+    Upload liegen)."""
+    try:
+        names = await asyncio.to_thread(storage.listdir, rel_dir)
+    except Exception as e:
+        logger.warning("PixInsight: Calib-Verzeichnis nicht lesbar — %s: %s", rel_dir, e)
+        return []
+    entries: list[dict[str, Any]] = []
+    for name in sorted(names):
+        rel = _clean_rel(rel_dir, name)
+        try:
+            size, mtime = await asyncio.to_thread(storage.stat, rel)
+        except Exception as e:
+            logger.warning("PixInsight: Calib-Datei nicht lesbar — %s: %s", rel, e)
+            continue
+        row = await db.scalar(
+            select(CalibFile).where(CalibFile.user_id == user.id, CalibFile.path == rel)
+        )
+        local: str | None = None
+        if row and row.file_size == size and abs(row.mtime - mtime) < 1.0:
+            sha = row.sha256
+        else:
+            local = str(Path(tmpdir) / f"h_{uuid.uuid4().hex}{Path(name).suffix}")
+            await asyncio.to_thread(storage.fetch, rel, local)
+            sha = await asyncio.to_thread(_sha256_file, local)
+            if row:
+                row.file_size, row.mtime, row.sha256 = size, mtime, sha
+            else:
+                db.add(CalibFile(user_id=user.id, path=rel, file_size=size, mtime=mtime, sha256=sha))
+            logger.info("PixInsight: Calib gehasht — %s (%s…)", name, sha[:12])
+        entries.append({
+            "name": name, "rel": rel, "size": size,
+            "ext": Path(name).suffix.lower(), "sha256": sha, "local": local,
+        })
+    return entries
+
+
+async def _prepare_calibration(
+    db: AsyncSession, user: User, calib_dirs: dict[str, str], tmpdir: str
+) -> dict[str, Any]:
+    """Baut den Kalibrier-Plan für den Agent.
+
+    Je Art (bias/dark/flat): existiert für das aktuelle Datei-Set schon ein
+    fertiger Master auf dem NAS (CalibMaster, gleicher set_hash), wird NUR
+    dieser referenziert — sonst die Roh-Subs. Übertragen wird später nichts
+    davon blind: der Agent meldet per /calib/check, was ihm fehlt.
+    """
     storage = archive.get_storage(user)
-    files: list[tuple[str, bytes]] = []
-    for dir_key, label in [("flats_dir", "Flats"), ("darks_dir", "Darks"), ("bias_dir", "Bias")]:
+    calib_msg: dict[str, Any] = {
+        "master_bias": None, "master_dark": None, "master_flat": None,
+        "bias_subs": [], "dark_subs": [], "flat_subs": [],
+    }
+    manifest: list[dict[str, Any]] = []
+    sources: dict[str, tuple[str, str]] = {}   # sha → ("local", pfad) | ("nas", rel)
+    set_hashes: dict[str, str] = {}
+    entries_by_kind: dict[str, list[dict[str, Any]]] = {}
+
+    for kind, dir_key, _master_name in CALIB_KINDS:
         rel_dir = calib_dirs.get(dir_key, "")
         if not rel_dir:
             continue
-        try:
-            names = await asyncio.to_thread(storage.listdir, rel_dir)
-            if not names:
-                logger.warning("PixInsight: Calib-Verzeichnis %s leer/nicht gefunden: %s", label, rel_dir)
-                continue
-            for name in names:
-                rel = "/".join(p for p in (rel_dir + "/" + name).replace("\\", "/").split("/") if p)
-                tmp_path = None
-                try:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(name).suffix) as tmp:
-                        tmp_path = tmp.name
-                    await asyncio.to_thread(storage.fetch, rel, tmp_path)
-                    with open(tmp_path, "rb") as f:
-                        content = f.read()
-                    files.append((name, content))
-                    logger.info("PixInsight: Calib gelesen — %s (%d bytes)", name, len(content))
-                except Exception as e:
-                    logger.warning("PixInsight: Calib-Datei nicht lesbar — %s: %s", name, e)
-                finally:
-                    if tmp_path:
-                        Path(tmp_path).unlink(missing_ok=True)
-        except Exception as e:
-            logger.warning("PixInsight: Calib-Verzeichnis nicht lesbar — %s (%s): %s", label, rel_dir, e)
-    return files
+        entries = await _hash_calib_dir(db, storage, user, rel_dir, tmpdir)
+        if not entries:
+            logger.warning("PixInsight: Calib-Verzeichnis %s leer/nicht gefunden: %s", kind, rel_dir)
+            continue
+        entries_by_kind[kind] = entries
+        set_hash = hashlib.sha256(
+            "\n".join(sorted(e["sha256"] for e in entries)).encode()
+        ).hexdigest()
+        set_hashes[kind] = set_hash
 
-def _create_zip(files: list[tuple[str, bytes]]) -> bytes:
-    """Erstellt ein ZIP im Speicher aus (filename, content) Paaren."""
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for name, content in files:
-            zf.writestr(name, content)
-    return buf.getvalue()
+        master = await db.scalar(
+            select(CalibMaster).where(
+                CalibMaster.user_id == user.id,
+                CalibMaster.kind == kind,
+                CalibMaster.set_hash == set_hash,
+            )
+        )
+        if master and await asyncio.to_thread(storage.exists, master.archive_path):
+            item = {
+                "sha256": master.sha256,
+                "size": master.file_size or 0,
+                "ext": Path(master.filename).suffix.lower() or ".xisf",
+            }
+            calib_msg[f"master_{kind}"] = item
+            manifest.append(item)
+            sources[master.sha256] = ("nas", master.archive_path)
+            logger.info("PixInsight: %s-Master vom NAS wiederverwendet (%s, set=%s…)",
+                        kind, master.filename, set_hash[:12])
+        else:
+            for e in entries:
+                item = {"sha256": e["sha256"], "size": e["size"], "ext": e["ext"]}
+                calib_msg[f"{kind}_subs"].append(item)
+                manifest.append(item)
+                sources[e["sha256"]] = ("local", e["local"]) if e["local"] else ("nas", e["rel"])
+            logger.info("PixInsight: %s — %d Subs, Master wird gebaut (set=%s…)",
+                        kind, len(entries), set_hash[:12])
+
+    return {
+        "calib": calib_msg, "manifest": manifest, "sources": sources,
+        "set_hashes": set_hashes, "entries_by_kind": entries_by_kind,
+    }
+
+
+async def _sync_calib_cache(
+    storage, plan: dict[str, Any], tmpdir: str
+) -> dict[str, Any] | None:
+    """Handshake mit dem Agent-Cache: /calib/check → nur Fehlendes hochladen.
+
+    Liefert eine Transfer-Statistik — oder None, wenn der Agent den Cache
+    noch nicht kennt (alte Version) → Legacy-Fallback (Calib im ZIP)."""
+    manifest = plan["manifest"]
+    if not manifest:
+        return {"present": 0, "uploaded": 0, "uploaded_bytes": 0}
+    token = await _agent_token()
+    by_sha = {m["sha256"]: m for m in manifest}
+    async with httpx.AsyncClient(timeout=600.0) as client:
+        resp = await client.post(
+            await _agent_url("/calib/check"),
+            json={"token": token, "files": list(by_sha.values())},
+        )
+        if resp.status_code == 404:
+            return None  # Agent kennt den Calib-Cache nicht (v0.7)
+        resp.raise_for_status()
+        missing = [s for s in resp.json().get("missing", []) if s in by_sha]
+
+        uploaded_bytes = 0
+        for sha in missing:
+            m = by_sha[sha]
+            src_kind, src = plan["sources"][sha]
+            local = src
+            if src_kind == "nas":
+                local = str(Path(tmpdir) / f"u_{sha[:16]}{m['ext']}")
+                await asyncio.to_thread(storage.fetch, src, local)
+            with open(local, "rb") as f:
+                up = await client.post(
+                    await _agent_url("/calib/upload"),
+                    data={"token": token, "sha256": sha, "ext": m["ext"]},
+                    files={"file": (f"{sha}{m['ext']}", f, "application/octet-stream")},
+                )
+                up.raise_for_status()
+            uploaded_bytes += Path(local).stat().st_size
+            logger.info("PixInsight: Calib hochgeladen — %s… (%s)", sha[:12], m["ext"])
+
+    return {
+        "present": len(by_sha) - len(missing),
+        "uploaded": len(missing),
+        "uploaded_bytes": uploaded_bytes,
+    }
+
+
+def _create_zip_at(files: list[tuple[str, str]], zip_path: str) -> int:
+    """Erstellt ein ZIP auf Platte aus (arcname, lokaler Pfad) Paaren.
+
+    ZIP_STORED statt DEFLATED: FITS-Daten sind Rauschen und komprimieren
+    praktisch nicht — Deflate kostet nur CPU."""
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
+        for arcname, local in files:
+            zf.write(local, arcname)
+    return Path(zip_path).stat().st_size
 
 
 async def _extract_zip(zip_bytes: bytes, dest_dir: Path) -> list[str]:
@@ -329,6 +485,61 @@ async def _write_prepared_to_storage(
     return written
 
 
+async def _harvest_calib_masters(
+    db: AsyncSession, user: User, bjob: BackendJob, local_dir: Path
+) -> list[str]:
+    """Stufe 3: frisch gebaute Bias/Dark/Flat-Master aus dem Ergebnis
+    abzweigen und aufs NAS legen (Calib/Masters/), in der DB registrieren.
+
+    Die Dateien werden aus local_dir ENTFERNT, damit sie nicht zusätzlich
+    im Prepared-Baum landen. Folgejobs mit demselben Calib-Set schicken dann
+    nur noch diese Master an den Agent statt der Roh-Subs."""
+    if not bjob.calib_set_hashes:
+        return []
+    storage = archive.get_storage(user)
+    harvested: list[str] = []
+    for kind, _dir_key, master_name in CALIB_KINDS:
+        set_hash = bjob.calib_set_hashes.get(kind)
+        if not set_hash:
+            continue
+        candidates = [f for f in local_dir.rglob(master_name) if f.is_file()]
+        if not candidates:
+            continue
+        local = candidates[0]
+        existing = await db.scalar(
+            select(CalibMaster).where(
+                CalibMaster.user_id == user.id,
+                CalibMaster.kind == kind,
+                CalibMaster.set_hash == set_hash,
+            )
+        )
+        if existing:
+            # Master für dieses Set schon registriert (z. B. Re-Run) —
+            # Datei nur aus dem Ergebnis entfernen.
+            local.unlink(missing_ok=True)
+            continue
+        filename = f"master_{kind}_{set_hash[:16]}.xisf"
+        dest_rel = f"{CALIB_MASTERS_FOLDER}/{filename}"
+        try:
+            sha = await asyncio.to_thread(_sha256_file, str(local))
+            size = local.stat().st_size
+            await asyncio.to_thread(storage.put, dest_rel, str(local))
+            db.add(CalibMaster(
+                user_id=user.id, kind=kind, set_hash=set_hash,
+                archive_path=dest_rel, filename=filename,
+                sha256=sha, file_size=size,
+            ))
+            local.unlink(missing_ok=True)
+            harvested.append(dest_rel)
+            logger.info("PixInsight: %s-Master aufs NAS gelegt — %s (set=%s…)",
+                        kind, dest_rel, set_hash[:12])
+        except Exception as e:
+            logger.warning("PixInsight: Konnte %s-Master nicht aufs NAS legen: %s", kind, e)
+    if harvested:
+        await db.flush()
+    return harvested
+
+
 async def _cleanup_agent_job(agent_job_id: str) -> None:
     """Sendet DELETE /jobs/{job_id} an den Agent, damit dieser seine
     Temp-Dateien (Input + Output) restlos aufraeumt."""
@@ -363,6 +574,8 @@ async def _do_batch_transfer(
     per HTTP an den Mac-Agent hoch.  Aktualisiert den BackendJob-Status."""
     from datetime import datetime, timezone
 
+    tmpdir_obj = tempfile.TemporaryDirectory(prefix="curastro_pi_")
+    tmpdir = tmpdir_obj.name
     try:
         async with async_session() as db:
             # Observation und User laden
@@ -373,9 +586,9 @@ async def _do_batch_transfer(
                 job.error = "Observation oder User nicht gefunden"
                 return
 
-            # RAW-Dateien vom NAS lesen
+            # RAW-Dateien vom NAS in ein lokales Temp-Verzeichnis holen
             logger.info("PixInsight [job=%s]: sammle RAW-Dateien …", job.id)
-            raw_files = await _collect_raw_files(db, user, obs)
+            raw_files = await _collect_raw_files(db, user, obs, Path(tmpdir) / "raw")
             if not raw_files:
                 job.status = "failed"
                 job.error = "Konnte keine RAW-Dateien vom Storage lesen"
@@ -384,26 +597,57 @@ async def _do_batch_transfer(
             job.input_files = len(raw_files)
             logger.info("PixInsight [job=%s]: %d RAW-Dateien gelesen", job.id, len(raw_files))
 
-            # Calibration-Frames vom NAS lesen und zum ZIP hinzufügen
-            calib_files = await _collect_calibration_files(db, user, obs, calib_dirs)
-            all_files = raw_files + calib_files
-            if calib_files:
-                logger.info("PixInsight [job=%s]: %d Calib-Frames vom NAS gelesen", job.id, len(calib_files))
+            # Kalibrier-Plan: Fingerprints (DB-Cache), Master vom NAS falls
+            # vorhanden, sonst Roh-Subs — übertragen wird erst nach /calib/check.
+            calib_plan = await _prepare_calibration(db, user, calib_dirs, tmpdir)
+            job.calib_set_hashes = calib_plan["set_hashes"]
 
-            # ZIP erstellen (im Thread, da CPU-bound)
-            zip_bytes = await asyncio.to_thread(_create_zip, all_files)
-            logger.info("PixInsight [job=%s]: ZIP erstellt (%d bytes, %d Dateien)", job.id, len(zip_bytes), len(all_files))
-
-            # Observation-Status setzen
+            # Observation-Status setzen (committet auch die CalibFile-Hashes)
             obs.status = "in_bearbeitung"
             obs.is_new = False
             await db.commit()
 
-        # ZIP an Mac-Agent hochladen (außerhalb der DB-Session)
+            storage = archive.get_storage(user)
+
+        # Cache-Handshake mit dem Agent: nur fehlende Calib-Dateien hochladen
+        legacy_calib: list[tuple[str, str]] = []
+        calib_json = ""
+        try:
+            transfer = await _sync_calib_cache(storage, calib_plan, tmpdir)
+        except Exception as e:
+            logger.warning("PixInsight [job=%s]: Calib-Cache-Sync fehlgeschlagen (%s) — Legacy-Fallback", job.id, e)
+            transfer = None
+        if transfer is None:
+            # Alter Agent ohne Calib-Cache: Roh-Subs klassisch ins ZIP packen.
+            logger.warning("PixInsight [job=%s]: Agent ohne Calib-Cache — Calib-Frames wandern ins ZIP", job.id)
+            for kind, entries in calib_plan["entries_by_kind"].items():
+                for e in entries:
+                    local = e["local"]
+                    if not local:
+                        local = str(Path(tmpdir) / f"l_{uuid.uuid4().hex}{e['ext']}")
+                        await asyncio.to_thread(storage.fetch, e["rel"], local)
+                    legacy_calib.append((e["name"], local))
+        else:
+            job.calib_transfer = transfer
+            calib_json = json.dumps(calib_plan["calib"])
+            logger.info(
+                "PixInsight [job=%s]: Calib-Cache — %d im Cache, %d hochgeladen (%.1f MB)",
+                job.id, transfer["present"], transfer["uploaded"],
+                transfer["uploaded_bytes"] / (1024 * 1024),
+            )
+
+        # ZIP (nur Lights + ggf. Legacy-Calib) auf Platte erstellen
+        zip_files = raw_files + legacy_calib
+        zip_path = str(Path(tmpdir) / "raw_frames.zip")
+        zip_size = await asyncio.to_thread(_create_zip_at, zip_files, zip_path)
+        logger.info("PixInsight [job=%s]: ZIP erstellt (%.1f MB, %d Dateien)",
+                    job.id, zip_size / (1024 * 1024), len(zip_files))
+
+        # ZIP an Mac-Agent hochladen (gestreamt von Platte)
         agent_url = await _agent_url("/process")
         logger.info(
-            "PixInsight [job=%s]: sende ZIP (%d bytes) an %s (mode=%s, flats=%s, darks=%s, bias=%s)",
-            job.id, len(zip_bytes), agent_url, mode,
+            "PixInsight [job=%s]: sende ZIP (%.1f MB) an %s (mode=%s, flats=%s, darks=%s, bias=%s)",
+            job.id, zip_size / (1024 * 1024), agent_url, mode,
             calib_dirs.get("flats_dir") or "(keine)",
             calib_dirs.get("darks_dir") or "(keine)",
             calib_dirs.get("bias_dir") or "(keine)",
@@ -414,14 +658,17 @@ async def _do_batch_transfer(
             "mode": mode,
             "token": await _agent_token(),
         }
+        if calib_json:
+            form_data["calib"] = calib_json
 
         try:
             async with httpx.AsyncClient(timeout=600.0) as client:
-                resp = await client.post(
-                    agent_url,
-                    files={"file": ("raw_frames.zip", zip_bytes, "application/zip")},
-                    data=form_data,
-                )
+                with open(zip_path, "rb") as zf_handle:
+                    resp = await client.post(
+                        agent_url,
+                        files={"file": ("raw_frames.zip", zf_handle, "application/zip")},
+                        data=form_data,
+                    )
                 resp.raise_for_status()
                 data = resp.json()
         except httpx.ConnectError:
@@ -465,6 +712,8 @@ async def _do_batch_transfer(
                     await db.commit()
         except Exception:
             pass
+    finally:
+        tmpdir_obj.cleanup()
 
 
 async def trigger_batch(
@@ -613,6 +862,10 @@ async def poll_job_results(
             if not extracted:
                 return {"job_id": job_id, "status": "error", "error": "Ergebnis-ZIP ist leer"}
 
+            # Frisch gebaute Bias/Dark/Flat-Master aufs NAS legen (Calib/Masters/)
+            # und aus dem Ergebnis entfernen — Folgejobs nutzen sie direkt.
+            harvested = await _harvest_calib_masters(db, user, bjob, tmp_path)
+
             # Ergebnis-Dateien ins Storage (NAS) schreiben
             prepared_rel = await prepared_reldir(db, user, obs)
             written = await _write_prepared_to_storage(user, prepared_rel, tmp_path)
@@ -634,6 +887,7 @@ async def poll_job_results(
             "result_files": written,
             "result_count": len(written),
             "prepared_dir": prepared_rel,
+            "calib_masters_saved": harvested,
         }
 
     # Bereits abgeschlossen

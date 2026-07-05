@@ -51,6 +51,7 @@ class Storage:
     def fetch(self, rel: str, dest_local: str) -> None: raise NotImplementedError
     def delete(self, rel: str) -> None: raise NotImplementedError
     def listdir(self, rel: str) -> list[str]: raise NotImplementedError
+    def stat(self, rel: str) -> tuple[int, float]: raise NotImplementedError  # (size, mtime)
     def full_path(self, rel: str) -> str: raise NotImplementedError
     def status(self) -> dict: raise NotImplementedError
 
@@ -85,6 +86,10 @@ class LocalStorage(Storage):
     def listdir(self, rel: str) -> list[str]:
         p = self._abs(rel)
         return [e.name for e in p.iterdir() if e.is_file()] if p.is_dir() else []
+
+    def stat(self, rel: str) -> tuple[int, float]:
+        st = self._abs(rel).stat()
+        return st.st_size, st.st_mtime
 
     def delete(self, rel: str) -> None:
         self._abs(rel).unlink(missing_ok=True)
@@ -203,6 +208,12 @@ class SmbStorage(Storage):
             smbclient.remove(self._unc(rel))
         except Exception:  # noqa: BLE001
             pass
+
+    def stat(self, rel: str) -> tuple[int, float]:
+        import smbclient
+        self._connect()
+        st = smbclient.stat(self._unc(rel))
+        return st.st_size, st.st_mtime
 
     def full_path(self, rel: str) -> str:
         return self._unc(rel)

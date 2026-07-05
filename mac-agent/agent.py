@@ -7,21 +7,29 @@ Ergebnisse werden als ZIP zurückgeladen.
 
 Alle Dateien werden über HTTP transferiert (kein SMB-Mount nötig):
 
-    Backend liest NAS  →  zip  →  POST /process (multipart)  →  Agent
+    Backend liest NAS  →  zip (Lights)  →  POST /process (multipart)  →  Agent
     Agent entpackt     →  PixInsight  →  zip  →  GET /results/{job_id}
     Backend entpackt   →  schreibt auf NAS (Prepared/)  →  Status: vorbereitet
     Backend ruft DELETE /jobs/{job_id}  →  Agent räumt Input + Output auf
 
-Calibration-Frames (Flats/Darks/Bias) liegen im selben ZIP wie die Lights
-(vom Backend per SMB vom NAS geholt). Keine lokalen Mac-Pfade mehr nötig.
+Calibration-Frames (Flats/Darks/Bias) laufen über den persistenten
+**Calib-Cache** (content-adressiert per SHA-256): das Backend fragt per
+POST /calib/check, was fehlt, und lädt nur Fehlendes per POST /calib/upload
+nach — jede Datei fließt genau EINMAL über die Leitung. Fertige Master
+werden zusätzlich in den Cache übernommen; das Backend legt sie parallel
+aufs NAS (Calib/Masters/) und referenziert bei Folgejobs nur noch sie.
+Legacy-Fallback: kommt kein calib-Feld, liegen die Calib-Frames im ZIP.
 
-Cleanup-Strategie (Platz sparen):
+Cleanup-Strategie (Platz sparen — der Mac hat wenig):
     - Nach PixInsight-Fertigstellung: Input-Verzeichnis (RAW-Frames) löschen
     - Nach erfolgreichem Ergebnis-Download: Output-Verzeichnis löschen
-    - DELETE /jobs/{job_id}: räumt alles restlose auf (Fallback)
+    - DELETE /jobs/{job_id}: räumt alles restlos auf (Fallback)
+    - Calib-Cache: LRU-Verdrängung auf CALIB_CACHE_MAX_GB (Default 20 GB)
 
 Endpoints:
-    GET  /health              — Health-Check
+    GET  /health              — Health-Check (inkl. Cache-Statistik)
+    POST /calib/check         — Cache-Handshake: welche SHA-256 fehlen?
+    POST /calib/upload        — einzelne Calib-Datei in den Cache (Hash-verifiziert)
     POST /process             — Job annehmen (ZIP-Upload) & PixInsight starten
     GET  /status/<job_id>     — Job-Status abfragen
     GET  /results/<job_id>    — Ergebnis-ZIP herunterladen (wenn completed)
@@ -33,6 +41,7 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -84,10 +93,17 @@ WORK_DIR = Path(os.environ.get("WORK_DIR", str(Path.home() / "cura-stro-jobs")))
 LOG_DIR = Path(os.environ.get("LOG_DIR", str(WORK_DIR / "logs")))
 MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "1"))
 
+# Persistenter Calib-Cache (content-adressiert: Dateiname = <sha256><ext>).
+# Kalibrier-Frames/-Master werden vom Backend nur EINMAL hochgeladen und
+# hier wiederverwendet. LRU-Aufräumen hält das Limit ein (Mac hat wenig Platz).
+CALIB_CACHE_DIR = Path(os.environ.get("CALIB_CACHE_DIR", str(WORK_DIR / "calib-cache")))
+CALIB_CACHE_MAX_GB = float(os.environ.get("CALIB_CACHE_MAX_GB", "20"))
+
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+CALIB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="cura-stro Mac-Agent", version="0.7.0")
+app = FastAPI(title="cura-stro Mac-Agent", version="0.8.0")
 
 
 # ─── Job-Tracking ───
@@ -106,6 +122,9 @@ class Job:
     return_code: int | None = None
     log_file: str | None = None
     error: str | None = None
+    # Aufgelöste Cache-Pfade für cura_batch.js (CURA_CALIB): masterBias/
+    # masterDark/masterFlat (Pfad oder "") + biasSubs/darkSubs/flatSubs.
+    calib_paths: dict[str, Any] = field(default_factory=dict)
     result_files: list[str] = field(default_factory=list)
     result_zip_size: int = 0
     input_cleaned: bool = False   # Input-Verzeichnis wurde gelöscht
@@ -125,6 +144,52 @@ class StatusResponse(BaseModel):
     status: str
 
 
+class CalibCheckRequest(BaseModel):
+    token: str = ""
+    files: list[dict[str, Any]] = []  # [{sha256, size, ext}]
+
+
+# ─── Calib-Cache (content-adressiert) ───
+def _cache_path(sha256: str, ext: str) -> Path:
+    ext = ext if ext.startswith(".") else ("." + ext if ext else "")
+    return CALIB_CACHE_DIR / f"{sha256}{ext}"
+
+
+def _cache_find(sha256: str) -> Path | None:
+    """Findet eine Cache-Datei über den Hash (Extension egal)."""
+    matches = list(CALIB_CACHE_DIR.glob(f"{sha256}.*")) + list(CALIB_CACHE_DIR.glob(sha256))
+    return matches[0] if matches else None
+
+
+def _cache_size_bytes() -> int:
+    return sum(f.stat().st_size for f in CALIB_CACHE_DIR.iterdir() if f.is_file())
+
+
+def _calib_cache_cleanup() -> None:
+    """LRU-Aufräumen: älteste (zuletzt benutzte) Dateien löschen, bis das
+    Limit eingehalten ist. 'Benutzt' = mtime, das wir bei jedem Treffer
+    aktualisieren (atime ist auf APFS oft deaktiviert)."""
+    limit = int(CALIB_CACHE_MAX_GB * 1024 ** 3)
+    files = sorted(
+        (f for f in CALIB_CACHE_DIR.iterdir() if f.is_file()),
+        key=lambda f: f.stat().st_mtime,
+    )
+    total = sum(f.stat().st_size for f in files)
+    evicted = 0
+    while total > limit and files:
+        victim = files.pop(0)
+        try:
+            size = victim.stat().st_size
+            victim.unlink()
+            total -= size
+            evicted += 1
+        except Exception:
+            break
+    if evicted:
+        log.info("Calib-Cache: %d Datei(en) verdrängt (LRU, Limit %.0f GB, jetzt %.1f GB)",
+                 evicted, CALIB_CACHE_MAX_GB, total / 1024 ** 3)
+
+
 def _check_token(token: str) -> None:
     if AGENT_TOKEN and token != AGENT_TOKEN:
         log.warning("Token-Prüfung fehlgeschlagen")
@@ -136,10 +201,11 @@ def _now_iso() -> str:
 
 
 def _zip_directory(src_dir: Path, zip_path: Path) -> int:
-    """Zippt ein gesamtes Verzeichnis (rekursiv) und liefert die Größe."""
+    """Zippt ein gesamtes Verzeichnis (rekursiv) und liefert die Größe.
+    ZIP_STORED: XISF/FITS komprimieren praktisch nicht — Deflate kostet nur CPU."""
     zip_path.parent.mkdir(parents=True, exist_ok=True)
     file_count = 0
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
         for file_path in sorted(src_dir.rglob("*")):
             if file_path.is_file():
                 arcname = file_path.relative_to(src_dir)
@@ -344,6 +410,27 @@ def _print_pi_log(log_file: Path, max_lines: int = 200) -> None:
         log.warning("  Konnte PixInsight-Log nicht lesen: %s", e)
 
 
+def _cache_built_masters(output_dir: Path) -> None:
+    """Übernimmt frisch gebaute master_bias/dark/flat.xisf in den Calib-Cache.
+
+    Das Backend registriert dieselben Dateien (gleiche Bytes → gleicher
+    SHA-256) auf dem NAS — beim nächsten Job trifft /calib/check dann sofort,
+    ohne dass der Master erneut hochgeladen werden muss."""
+    for name in ("master_bias.xisf", "master_dark.xisf", "master_flat.xisf"):
+        for f in output_dir.rglob(name):
+            try:
+                h = hashlib.sha256()
+                with open(f, "rb") as src:
+                    while chunk := src.read(1024 * 1024):
+                        h.update(chunk)
+                dest = _cache_path(h.hexdigest(), ".xisf")
+                if not dest.exists():
+                    shutil.copy2(f, dest)
+                    log.info("  Calib-Cache: %s übernommen (%s…)", name, h.hexdigest()[:12])
+            except Exception as e:
+                log.warning("  Konnte %s nicht in den Cache übernehmen: %s", name, e)
+
+
 def _print_batch_log(output_dir: Path) -> None:
     """Gibt das von cura_batch.js geschriebene Datei-Log auf der Agent-Konsole
     aus. Das ist die EINZIGE Quelle für Script-Ausgaben/Fehler — PixInsight
@@ -431,6 +518,7 @@ async def _run_pixinsight(job: Job) -> None:
             + "var CURA_OUTPUT_DIR = " + json.dumps(job.work_output) + ";\n"
             + "var CURA_MODE = " + json.dumps(job.mode) + ";\n"
             + "var CURA_FRAME_INFO = " + json.dumps(job.frame_info) + ";\n"
+            + "var CURA_CALIB = " + json.dumps(job.calib_paths or {}) + ";\n"
             + batch_source
         )
         wrapper_path.write_text(wrapper_js)
@@ -483,6 +571,8 @@ async def _run_pixinsight(job: Job) -> None:
                     job.status = "completed"
                     log.info("Job %s — PixInsight ABGESCHLOSSEN (exit 0, %d Dateien)",
                              job.id[:8], len(job.result_files))
+                    # Frisch gebaute Bias/Dark/Flat-Master in den Cache übernehmen
+                    _cache_built_masters(out_path)
                     zip_path = Path(job.work_output).parent / f"{job.id}_results.zip"
                     log.info("  Packe Ergebnis-ZIP …")
                     job.result_zip_size = _zip_directory(out_path, zip_path)
@@ -512,6 +602,7 @@ async def _run_pixinsight(job: Job) -> None:
         finally:
             job.completed_at = _now_iso()
             wrapper_path.unlink(missing_ok=True)
+            _calib_cache_cleanup()
             log.info("=" * 60)
 
 
@@ -519,10 +610,12 @@ async def _run_pixinsight(job: Job) -> None:
 @app.on_event("startup")
 async def _startup():
     log.info("=" * 60)
-    log.info("cura-stro Mac-Agent v0.7.0 — startet")
+    log.info("cura-stro Mac-Agent v0.8.0 — startet")
     log.info("  Port:         %d", AGENT_PORT)
     log.info("  Work-Dir:     %s", WORK_DIR)
     log.info("  Log-Dir:      %s", LOG_DIR)
+    log.info("  Calib-Cache:  %s (%.1f MB belegt, Limit %.0f GB)",
+             CALIB_CACHE_DIR, _cache_size_bytes() / (1024 * 1024), CALIB_CACHE_MAX_GB)
     log.info("  PixInsight:   %s (%s)",
              PIXINSIGHT_BIN,
              "✓ gefunden" if Path(PIXINSIGHT_BIN).exists() else "✗ NICHT gefunden")
@@ -561,14 +654,115 @@ async def health():
         "active_jobs": sum(1 for j in _jobs.values() if j.status == "running"),
         "total_jobs": len(_jobs),
         "shell_sim_available": True,
+        "calib_cache_files": sum(1 for f in CALIB_CACHE_DIR.iterdir() if f.is_file()),
+        "calib_cache_mb": round(_cache_size_bytes() / (1024 * 1024), 1),
+        "calib_cache_max_gb": CALIB_CACHE_MAX_GB,
     }
+
+
+@app.post("/calib/check")
+async def calib_check(req: CalibCheckRequest):
+    """Cache-Handshake: das Backend schickt das Manifest (sha256/size/ext),
+    der Agent meldet, welche Dateien ihm fehlen. Treffer werden 'berührt'
+    (mtime), damit das LRU-Aufräumen sie nicht verdrängt."""
+    _check_token(req.token)
+    missing: list[str] = []
+    present = 0
+    for item in req.files:
+        sha = str(item.get("sha256", ""))
+        if not sha:
+            continue
+        p = _cache_find(sha)
+        if p is None:
+            missing.append(sha)
+            continue
+        size = item.get("size") or 0
+        if size and p.stat().st_size != size:
+            # Beschädigt/unvollständig → neu anfordern
+            p.unlink(missing_ok=True)
+            missing.append(sha)
+            continue
+        p.touch()  # LRU-Treffer
+        present += 1
+    log.info("POST /calib/check — %d im Cache, %d fehlen", present, len(missing))
+    return {"present": present, "missing": missing}
+
+
+@app.post("/calib/upload")
+async def calib_upload(
+    file: UploadFile = File(...),
+    sha256: str = Form(...),
+    ext: str = Form(default=""),
+    token: str = Form(default=""),
+):
+    """Nimmt eine einzelne Calib-Datei entgegen und legt sie content-
+    adressiert im Cache ab. Der Hash wird beim Empfang verifiziert —
+    eine korrupte Übertragung landet nie im Cache."""
+    _check_token(token)
+    tmp_path = CALIB_CACHE_DIR / f".upload_{uuid.uuid4().hex}"
+    h = hashlib.sha256()
+    total = 0
+    try:
+        with open(tmp_path, "wb") as f:
+            while chunk := await file.read(1024 * 1024):
+                f.write(chunk)
+                h.update(chunk)
+                total += len(chunk)
+        actual = h.hexdigest()
+        if actual != sha256:
+            tmp_path.unlink(missing_ok=True)
+            log.error("POST /calib/upload — Hash-Mismatch (erwartet %s…, ist %s…)",
+                      sha256[:12], actual[:12])
+            raise HTTPException(400, "SHA-256 stimmt nicht — Übertragung korrupt")
+        final = _cache_path(sha256, ext or Path(file.filename or "").suffix)
+        tmp_path.replace(final)
+        log.info("POST /calib/upload — %s… gespeichert (%.1f MB)", sha256[:12], total / (1024 * 1024))
+        return {"stored": sha256, "bytes": total}
+    except HTTPException:
+        raise
+    except Exception as e:
+        tmp_path.unlink(missing_ok=True)
+        raise HTTPException(500, f"Upload fehlgeschlagen: {e}")
+
+
+def _resolve_calib(calib_json: str) -> dict[str, Any]:
+    """Löst das calib-Manifest des Backends (SHA-256-Referenzen) in lokale
+    Cache-Pfade für cura_batch.js auf. Fehlt eine Datei im Cache → 409,
+    das Backend muss sie erst per /calib/upload nachliefern."""
+    if not calib_json:
+        return {}
+    try:
+        calib = json.loads(calib_json)
+    except json.JSONDecodeError:
+        raise HTTPException(400, "calib ist kein gültiges JSON")
+
+    def resolve(item: dict[str, Any] | None) -> str:
+        if not item:
+            return ""
+        sha = str(item.get("sha256", ""))
+        p = _cache_find(sha)
+        if p is None:
+            raise HTTPException(409, f"Calib-Datei fehlt im Cache: {sha[:16]}… — erst /calib/upload")
+        p.touch()
+        return str(p)
+
+    resolved = {
+        "masterBias": resolve(calib.get("master_bias")),
+        "masterDark": resolve(calib.get("master_dark")),
+        "masterFlat": resolve(calib.get("master_flat")),
+        "biasSubs": [resolve(i) for i in calib.get("bias_subs", [])],
+        "darkSubs": [resolve(i) for i in calib.get("dark_subs", [])],
+        "flatSubs": [resolve(i) for i in calib.get("flat_subs", [])],
+    }
+    return resolved
 
 
 @app.post("/process")
 async def process(
-    file: UploadFile = File(..., description="ZIP mit RAW-Frames (Lights/Darks/Flats/Bias)"),
+    file: UploadFile = File(..., description="ZIP mit RAW-Frames (Lights; Calib via Cache)"),
     frame_info: str = Form(default="{}", description="JSON mit Frame-Metadaten"),
     mode: str = Form(default="wbpp", description="Processing-Modus: wbpp|fastbatch|shell_sim"),
+    calib: str = Form(default="", description="JSON: Calib-Referenzen (SHA-256 im Cache)"),
     token: str = Form(default=""),
 ):
     """Nimmt ein ZIP mit RAW-Frames entgegen, entpackt es lokal und startet
@@ -592,6 +786,17 @@ async def process(
     if mode not in ("wbpp", "fastbatch", "shell_sim"):
         log.warning("  Unbekannter Mode '%s' → fallback auf wbpp", mode)
         mode = "wbpp"
+
+    # Calib-Referenzen auflösen (409 wenn etwas im Cache fehlt)
+    calib_paths = _resolve_calib(calib)
+    if calib_paths:
+        log.info(
+            "  Calib (Cache):  Master B/D/F: %s/%s/%s — Subs B/D/F: %d/%d/%d",
+            "✓" if calib_paths["masterBias"] else "—",
+            "✓" if calib_paths["masterDark"] else "—",
+            "✓" if calib_paths["masterFlat"] else "—",
+            len(calib_paths["biasSubs"]), len(calib_paths["darkSubs"]), len(calib_paths["flatSubs"]),
+        )
 
     job_id = str(uuid.uuid4())
     job_dir = WORK_DIR / job_id
@@ -647,6 +852,7 @@ async def process(
         result_zip="",
         frame_info=info,
         mode=mode,
+        calib_paths=calib_paths,
     )
     _jobs[job_id] = job
 
