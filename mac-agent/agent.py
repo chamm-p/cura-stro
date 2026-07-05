@@ -167,7 +167,22 @@ class Job:
 
 
 _jobs: dict[str, Job] = {}
-_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+
+# WICHTIG: Das Semaphore darf NICHT beim Modul-Import entstehen. Auf
+# Python 3.9 bindet sich asyncio.Semaphore() an den Event-Loop zum
+# Zeitpunkt der Erzeugung — beim Import ist das ein anderer als der
+# uvicorn-Server-Loop. Folge: der erste Job läuft (kein Warten), aber
+# ein WARTENDER zweiter Job crasht mit 'got Future attached to a
+# different loop' und bleibt für immer 'queued'. Deshalb lazy im
+# laufenden Loop erzeugen.
+_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    global _semaphore
+    if _semaphore is None:
+        _semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+    return _semaphore
 
 
 # ─── Request-Models ───
@@ -327,7 +342,7 @@ def _count_frames(input_dir: Path) -> dict[str, int]:
 async def _run_shell_sim(job: Job) -> None:
     """Shell-Simulation: Kopiert Light-Frames als 'Master' in den Output-Ordner.
     Kein PixInsight nötig — validiert den gesamten HTTP-Flow."""
-    async with _semaphore:
+    async with _get_semaphore():
         job.status = "running"
         job.started_at = _now_iso()
         log.info("=" * 60)
@@ -553,7 +568,7 @@ def _kill_existing_pixinsight() -> None:
 
 async def _run_pixinsight(job: Job) -> None:
     """Führt PixInsight headless mit dem Batch-Skript aus."""
-    async with _semaphore:
+    async with _get_semaphore():
         job.status = "running"
         job.started_at = _now_iso()
         log.info("=" * 60)
