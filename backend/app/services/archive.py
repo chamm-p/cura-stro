@@ -126,7 +126,26 @@ async def import_files(
         parsed = asi.parse_frame_filename(safe)
         rel = f"{base}/{safe}"
         try:
-            size = await asyncio.to_thread(storage.put, rel, temp_path)
+            # Adoptieren statt kopieren: liegt die Datei schon exakt so im
+            # Archiv (z. B. Drag & Drop des Archiv-Ordners selbst), wird sie
+            # nur registriert. Verhindert nebenbei Sharing-Violations, wenn
+            # die Quelle == Ziel ist und der Client die Datei offen hält.
+            import os
+            size = 0
+            if await asyncio.to_thread(storage.exists, rel):
+                remote_size, _ = await asyncio.to_thread(storage.stat, rel)
+                local_size = os.path.getsize(temp_path)
+                if remote_size == local_size:
+                    size = remote_size
+                else:
+                    results.append({
+                        "file": safe, "status": "error",
+                        "error": f"Zieldatei existiert bereits mit anderer Größe "
+                                 f"({remote_size} statt {local_size} Bytes) — nicht überschrieben",
+                    })
+                    continue
+            else:
+                size = await asyncio.to_thread(storage.put, rel, temp_path)
         except Exception as e:  # noqa: BLE001
             results.append({"file": safe, "status": "error", "error": str(e)})
             continue
@@ -164,6 +183,57 @@ async def import_files(
         "dest": storage.full_path(base),
         "summary": await summary(db, obs),
     }
+
+
+async def register_files(
+    db: AsyncSession,
+    user: User,
+    obs: Observation,
+    rel_dir: str,
+    names: list[str],
+    *,
+    source: str = "nas",
+) -> dict:
+    """Registriert Dateien, die BEREITS im Archiv liegen (kein Kopieren) —
+    für den NAS-Scan-Import von Bestandsdaten. ``rel_dir`` ist der echte
+    Verzeichnispfad relativ zum Archiv-Root (kann vom Label abweichen)."""
+    from pathlib import PurePosixPath
+    storage = get_storage(user)
+    known = await _existing_filenames(db, obs)
+    added = 0
+    for name in names:
+        safe = PurePosixPath(name.replace("\\", "/")).name
+        if safe in known:
+            continue
+        parsed = asi.parse_frame_filename(safe)
+        rel = f"{rel_dir}/{safe}"
+        try:
+            size, _ = await asyncio.to_thread(storage.stat, rel)
+        except Exception:  # noqa: BLE001
+            size = None
+        db.add(SubFrame(
+            user_id=user.id, observation_id=obs.id,
+            frame_type=(parsed.frame_type if parsed else "Light"),
+            filter_name=(parsed.filter_name if parsed else None),
+            exposure_s=(parsed.exposure_s if parsed else None),
+            binning=(parsed.binning if parsed else None),
+            captured_at=(parsed.captured_at if parsed else None),
+            sequence=(parsed.sequence if parsed else None),
+            original_filename=safe, archive_path=storage.full_path(rel),
+            source_path=None, file_size=size, source=source,
+            verified=bool(size),
+        ))
+        known.add(safe)
+        added += 1
+    if added:
+        _bump_status(obs)
+        oldest = await db.scalar(
+            select(func.min(SubFrame.captured_at)).where(SubFrame.observation_id == obs.id)
+        )
+        if oldest:
+            obs.planned_date = oldest.date()
+    await db.flush()
+    return {"added": added, "skipped": len(names) - added}
 
 
 async def summary(db: AsyncSession, obs: Observation) -> dict:

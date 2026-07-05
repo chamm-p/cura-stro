@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  X, Loader2, CheckCircle2, AlertTriangle, FolderOpen, UploadCloud, Telescope,
+  X, Loader2, CheckCircle2, AlertTriangle, FolderOpen, UploadCloud, Telescope, FolderSearch, HardDrive,
 } from 'lucide-react'
 import api from '../services/api'
 
@@ -14,6 +14,11 @@ interface Group {
   matched_ident: string | null; matched_name: string | null; matched_telescope: string | null
   filters: { filter: string; subs: number }[]; nights: number; warnings: string[]
   sel: boolean
+}
+interface ScanGroup {
+  object: string; device: string; files: number; new: number; registered: number
+  matched_ident: string | null; matched_name: string | null; matched_telescope: string | null
+  warnings: string[]
 }
 
 const FIT_RE = /\.(fit|fits|fts)$/i
@@ -54,6 +59,11 @@ export default function FileImportModal({ onClose, onImported }: { onClose: () =
   const [progress, setProgress] = useState<{ done: number; total: number; current: string } | null>(null)
   const [result, setResult] = useState<{ filed: number; duplicates: number; errors: number } | null>(null)
   const [errorDetails, setErrorDetails] = useState<string[]>([])
+  const [scanGroups, setScanGroups] = useState<ScanGroup[] | null>(null)
+  const [scanFolder, setScanFolder] = useState('')
+  const [scanning, setScanning] = useState(false)
+  const [registering, setRegistering] = useState(false)
+  const [scanResult, setScanResult] = useState<number | null>(null)
   const [err, setErr] = useState('')
   const dirRef = useRef<HTMLInputElement>(null)
   const abortRef = useRef(false)
@@ -126,6 +136,23 @@ export default function FileImportModal({ onClose, onImported }: { onClose: () =
 
   const patchGroup = (key: string, data: Partial<Group>) =>
     setGroups((gs) => gs.map((g) => (g.key === key ? { ...g, ...data } : g)))
+
+  // ─── NAS-Scan: Bestandsdateien registrieren, ohne sie zu kopieren ───
+  const doScan = async (dryRun: boolean) => {
+    if (dryRun) { setScanning(true) } else { setRegistering(true) }
+    setErr(''); setScanResult(null)
+    try {
+      const r = await api.post('/api/import/scan', { dry_run: dryRun }, { timeout: 600000 })
+      setScanGroups(r.data.groups)
+      setScanFolder(r.data.raw_folder)
+      if (!dryRun) {
+        setScanResult(r.data.total_new)
+        if (r.data.total_new > 0) onImported()
+      }
+    } catch (e: any) {
+      setErr(e.response?.data?.detail || 'NAS-Scan fehlgeschlagen.')
+    } finally { setScanning(false); setRegistering(false) }
+  }
 
   const doImport = async () => {
     const selected = groups.filter((g) => g.sel)
@@ -205,6 +232,70 @@ export default function FileImportModal({ onClose, onImported }: { onClose: () =
           </button>
           <input ref={dirRef} type="file" multiple className="hidden" onChange={onPickDir} {...({ webkitdirectory: '' } as any)} />
         </div>
+
+        {/* NAS-Scan: Bestand registrieren ohne Upload */}
+        <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2.5">
+          <HardDrive className="h-4 w-4 shrink-0 text-indigo-300" />
+          <div className="min-w-0 flex-1 text-xs text-slate-400">
+            Liegen die Dateien <span className="text-slate-200">schon auf dem NAS im Archiv</span> (RAW-Baum)?
+            Dann nicht hochladen, sondern direkt registrieren — ohne Kopieren.
+          </div>
+          <button
+            onClick={() => doScan(true)}
+            disabled={scanning || registering || importing}
+            className="flex items-center gap-1.5 rounded-lg border border-white/10 px-3 py-1.5 text-xs text-slate-200 hover:bg-white/10 disabled:opacity-50"
+          >
+            {scanning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderSearch className="h-3.5 w-3.5" />}
+            NAS-Archiv scannen
+          </button>
+        </div>
+
+        {/* Scan-Ergebnis */}
+        {scanGroups && (
+          <div className="mt-3 rounded-xl border border-indigo-400/20 bg-indigo-500/5 p-3">
+            <div className="mb-2 text-xs font-medium text-indigo-200">
+              NAS-Scan · <span className="font-mono">{scanFolder}/</span> — {scanGroups.length} Gruppe(n)
+            </div>
+            {scanGroups.length === 0 && (
+              <div className="text-xs text-slate-400">Keine Objekt/Gerät-Ordner mit FIT-Dateien gefunden.</div>
+            )}
+            <div className="space-y-1.5">
+              {scanGroups.map((g) => (
+                <div key={`${g.object}|${g.device}`} className="flex flex-wrap items-center gap-2 rounded-lg border border-white/10 bg-black/20 px-2.5 py-1.5 text-xs">
+                  <span className="font-medium text-slate-200">{g.object}/{g.device}</span>
+                  <span className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] text-slate-300">{g.files} Subs</span>
+                  {g.registered > 0 ? (
+                    <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[11px] text-emerald-300">✓ {g.registered} registriert</span>
+                  ) : g.new > 0 ? (
+                    <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-[11px] text-amber-200">{g.new} neu</span>
+                  ) : (
+                    <span className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] text-slate-500">alle bekannt</span>
+                  )}
+                  {g.matched_ident && <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[11px] text-emerald-300">✓ {g.matched_ident}</span>}
+                  {g.matched_telescope && <span className="flex items-center gap-1 rounded-full bg-emerald-500/20 px-2 py-0.5 text-[11px] text-emerald-300"><Telescope className="h-3 w-3" /> {g.matched_telescope}</span>}
+                  {g.warnings.map((w, i) => (
+                    <span key={i} className="flex items-center gap-1 text-[11px] text-amber-300"><AlertTriangle className="h-3 w-3" /> {w}</span>
+                  ))}
+                </div>
+              ))}
+            </div>
+            {scanResult !== null && (
+              <div className="mt-2 flex items-center gap-2 rounded-lg border border-emerald-400/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200">
+                <CheckCircle2 className="h-4 w-4 shrink-0" /> {scanResult} Sub(s) registriert — ohne Kopieren.
+              </div>
+            )}
+            {scanResult === null && scanGroups.some((g) => g.new > 0) && (
+              <button
+                onClick={() => doScan(false)}
+                disabled={registering}
+                className="mt-2 flex items-center gap-2 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-4 py-2 text-sm font-medium text-white hover:from-indigo-400 hover:to-violet-500 disabled:opacity-50"
+              >
+                {registering ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                {scanGroups.reduce((n, g) => n + g.new, 0)} neue Subs registrieren
+              </button>
+            )}
+          </div>
+        )}
 
         {analyzing && (
           <div className="mt-3 flex items-center gap-2 text-sm text-slate-400"><Loader2 className="h-4 w-4 animate-spin" /> Analysiere Dateien …</div>

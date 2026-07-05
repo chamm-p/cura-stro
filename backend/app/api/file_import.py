@@ -29,7 +29,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.asiair import _catalog_map, _upsert_observation
 from app.api.deps import get_current_user
 from app.database import get_db
+from app.models.observation import Observation
 from app.models.observing import Telescope
+from app.models.subframe import SubFrame
 from app.models.user import User
 from app.services import archive
 from app.services import asiair as asi
@@ -121,6 +123,94 @@ async def preview(
             "warnings": warnings,
         })
     return {"groups": out, "skipped": skipped}
+
+
+class ScanBody(BaseModel):
+    dry_run: bool = True
+
+
+@router.post("/scan")
+async def scan_archive(
+    body: ScanBody,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Scannt den RAW-Baum des NAS-Archivs (<RAW>/<Objekt>/<Gerät>/*.fit) und
+    registriert Bestandsdateien OHNE sie zu kopieren — für Fotos, die schon
+    auf dem NAS liegen. dry_run=true liefert nur die Vorschau."""
+    import asyncio
+
+    storage = archive.get_storage(user)
+    raw_folder = archive.folder_name(user, "RAW")
+    cat = await _catalog_map(db)
+    scopes = list(await db.scalars(select(Telescope).where(Telescope.user_id == user.id)))
+    scope_by_lower = {(t.name or "").strip().lower(): t for t in scopes}
+
+    try:
+        objects = await asyncio.to_thread(storage.listsubdirs, raw_folder)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"RAW-Ordner nicht lesbar ({raw_folder}): {e}")
+
+    groups = []
+    total_new = 0
+    for obj in sorted(objects):
+        devices = await asyncio.to_thread(storage.listsubdirs, f"{raw_folder}/{obj}")
+        for dev in sorted(devices):
+            rel_dir = f"{raw_folder}/{obj}/{dev}"
+            names = [
+                n for n in await asyncio.to_thread(storage.listdir, rel_dir)
+                if PurePosixPath(n).suffix.lower() in RAW_EXTS
+            ]
+            if not names:
+                continue
+            match = cat.get(asi.normalize_object(obj))
+            scope = scope_by_lower.get(dev.strip().lower())
+            warnings = []
+            if not scope:
+                warnings.append(f"„{dev}“ ist nicht als Teleskop angelegt.")
+
+            # Bestehende Aufnahme suchen (ohne anzulegen), um 'neu' zu zählen.
+            q = select(Observation).where(Observation.user_id == user.id)
+            if match:
+                q = q.where(Observation.catalog_object_id == match.id)
+            else:
+                q = q.where(Observation.target_label == obj, Observation.catalog_object_id.is_(None))
+            q = q.where(Observation.telescope_id == scope.id if scope else Observation.telescope_id.is_(None))
+            obs = await db.scalar(q)
+            existing = set()
+            if obs:
+                existing = set(await db.scalars(
+                    select(SubFrame.original_filename).where(SubFrame.observation_id == obs.id)
+                ))
+            new_names = [n for n in names if PurePosixPath(n.replace("\\", "/")).name not in existing]
+
+            registered = 0
+            if not body.dry_run and new_names:
+                obs = obs or await _upsert_observation(
+                    db, user, match, match.ident if match else obj,
+                    scope.id if scope else None,
+                )
+                r = await archive.register_files(db, user, obs, rel_dir, new_names, source="nas")
+                registered = r["added"]
+                total_new += registered
+
+            groups.append({
+                "object": obj, "device": dev, "files": len(names),
+                "new": len(new_names), "registered": registered,
+                "matched_ident": match.ident if match else None,
+                "matched_name": match.name if match else None,
+                "matched_telescope": scope.name if scope else None,
+                "warnings": warnings,
+            })
+
+    if not body.dry_run:
+        await db.commit()
+    return {
+        "dry_run": body.dry_run,
+        "raw_folder": raw_folder,
+        "groups": groups,
+        "total_new": sum(g["new"] for g in groups) if body.dry_run else total_new,
+    }
 
 
 @router.post("/file")
