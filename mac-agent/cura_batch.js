@@ -115,6 +115,23 @@ function findImageFilesRecursive(dir) {
     return files;
 }
 
+function removeTree(dir) {
+    if (!File.directoryExists(dir)) return;
+    try {
+        var entries = searchDirectory(dir + "/*");
+        if (entries) {
+            for (var i = 0; i < entries.length; i++) {
+                if (File.directoryExists(entries[i])) {
+                    removeTree(entries[i]);
+                } else {
+                    try { File.remove(entries[i]); } catch (e) { /* ignore */ }
+                }
+            }
+        }
+    } catch (e) { /* ignore */ }
+    try { File.removeDirectory(dir); } catch (e) { /* ignore */ }
+}
+
 function classifyFrame(filepath) {
     // Dateinamen aus Pfad extrahieren
     var name = filepath;
@@ -528,6 +545,13 @@ if (alignedLights.length === 0) {
     throw new Error("StarAlignment produced no output");
 }
 
+// Kalibrierte Einzelframes sofort freigeben — sie werden nach dem Alignment
+// nicht mehr gebraucht. Halbiert den Spitzen-Platzbedarf (wichtig, wenn das
+// Work-Dir auf dem NAS oder einer kleinen Platte liegt).
+flog("Gebe kalibrierte Zwischenframes frei (calibrated/) …");
+removeTree(calDir);
+flush();
+
 // ─── 4. ImageIntegration (Stack) — getrennt je Filter ───
 // Alle Frames wurden gemeinsam auf EINE Referenz ausgerichtet; die
 // Filter-Master sind dadurch zueinander registriert und können später
@@ -695,26 +719,11 @@ if (masters.length === 0) {
 }
 
 // ─── Zwischenergebnisse aufräumen ───
-// Kalibrierte/ausgerichtete Einzelframes sind gross (Float32) und jederzeit
+// Ausgerichtete Einzelframes sind gross (Float32) und jederzeit
 // reproduzierbar — sie werden NICHT mit zurückübertragen. Nur die Master
-// (je Filter + Bias/Dark/Flat) bleiben im Output.
-function removeTree(dir) {
-    if (!File.directoryExists(dir)) return;
-    try {
-        var entries = searchDirectory(dir + "/*");
-        if (entries) {
-            for (var i = 0; i < entries.length; i++) {
-                if (File.directoryExists(entries[i])) {
-                    removeTree(entries[i]);
-                } else {
-                    try { File.remove(entries[i]); } catch (e) { /* ignore */ }
-                }
-            }
-        }
-    } catch (e) { /* ignore */ }
-    try { File.removeDirectory(dir); } catch (e) { /* ignore */ }
-}
-flog("Räume Zwischenergebnisse auf (calibrated/, aligned/) …");
+// (je Filter + Bias/Dark/Flat) bleiben im Output. (calibrated/ wurde schon
+// direkt nach dem Alignment freigegeben.)
+flog("Räume Zwischenergebnisse auf (aligned/) …");
 removeTree(calDir);
 removeTree(alignedDir);
 

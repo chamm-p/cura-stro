@@ -99,9 +99,38 @@ MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "1"))
 CALIB_CACHE_DIR = Path(os.environ.get("CALIB_CACHE_DIR", str(WORK_DIR / "calib-cache")))
 CALIB_CACHE_MAX_GB = float(os.environ.get("CALIB_CACHE_MAX_GB", "20"))
 
-WORK_DIR.mkdir(parents=True, exist_ok=True)
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-CALIB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+def _required_volume(path: Path) -> Path | None:
+    """Liegt der Pfad auf einem externen Volume (/Volumes/<Name>/…), liefert
+    das Volume-Root — sonst None (lokaler Pfad, immer verfügbar)."""
+    parts = Path(path).parts
+    if len(parts) >= 3 and parts[0] == "/" and parts[1] == "Volumes":
+        return Path("/Volumes") / parts[2]
+    return None
+
+
+def _workdir_available() -> tuple[bool, str]:
+    """Prüft, ob das Work-Dir wirklich beschreibbar verfügbar ist.
+
+    Kritisch bei WORK_DIR auf dem NAS: ist das SMB-Volume NICHT gemountet,
+    würde mkdir unter /Volumes/<Name>/ still einen lokalen Ordner anlegen
+    und die Mac-Platte volllaufen lassen — genau das verhindern wir."""
+    for p in (WORK_DIR, CALIB_CACHE_DIR):
+        vol = _required_volume(p)
+        if vol is not None and not os.path.ismount(vol):
+            return False, f"NAS-Volume nicht gemountet: {vol} (benötigt für {p})"
+    return True, ""
+
+
+def _ensure_work_dirs() -> None:
+    WORK_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    CALIB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# Verzeichnisse nur anlegen, wenn das Volume wirklich da ist (sonst legt
+# der Startup-Check los und /process antwortet 503 mit klarer Meldung).
+if _workdir_available()[0]:
+    _ensure_work_dirs()
 
 app = FastAPI(title="cura-stro Mac-Agent", version="0.8.0")
 
@@ -157,11 +186,24 @@ def _cache_path(sha256: str, ext: str) -> Path:
 
 def _cache_find(sha256: str) -> Path | None:
     """Findet eine Cache-Datei über den Hash (Extension egal)."""
+    if not CALIB_CACHE_DIR.is_dir():
+        return None
     matches = list(CALIB_CACHE_DIR.glob(f"{sha256}.*")) + list(CALIB_CACHE_DIR.glob(sha256))
     return matches[0] if matches else None
 
 
+def _require_workdir() -> None:
+    """Wirft 503, wenn das Work-Dir (z. B. NAS-Volume) nicht verfügbar ist —
+    statt still auf die lokale Platte zu schreiben."""
+    ok, msg = _workdir_available()
+    if not ok:
+        raise HTTPException(503, f"{msg} — bitte das NAS-Volume auf dem Mac mounten")
+    _ensure_work_dirs()
+
+
 def _cache_size_bytes() -> int:
+    if not CALIB_CACHE_DIR.is_dir():
+        return 0
     return sum(f.stat().st_size for f in CALIB_CACHE_DIR.iterdir() if f.is_file())
 
 
@@ -169,6 +211,8 @@ def _calib_cache_cleanup() -> None:
     """LRU-Aufräumen: älteste (zuletzt benutzte) Dateien löschen, bis das
     Limit eingehalten ist. 'Benutzt' = mtime, das wir bei jedem Treffer
     aktualisieren (atime ist auf APFS oft deaktiviert)."""
+    if not CALIB_CACHE_DIR.is_dir():
+        return
     limit = int(CALIB_CACHE_MAX_GB * 1024 ** 3)
     files = sorted(
         (f for f in CALIB_CACHE_DIR.iterdir() if f.is_file()),
@@ -610,9 +654,15 @@ async def _run_pixinsight(job: Job) -> None:
 @app.on_event("startup")
 async def _startup():
     log.info("=" * 60)
-    log.info("cura-stro Mac-Agent v0.8.0 — startet")
+    log.info("cura-stro Mac-Agent v0.8.1 — startet")
     log.info("  Port:         %d", AGENT_PORT)
-    log.info("  Work-Dir:     %s", WORK_DIR)
+    wd_ok, wd_msg = _workdir_available()
+    if wd_ok:
+        _ensure_work_dirs()
+        log.info("  Work-Dir:     %s", WORK_DIR)
+    else:
+        log.error("  Work-Dir:     NICHT VERFÜGBAR — %s", wd_msg)
+        log.error("                Jobs werden mit 503 abgelehnt, bis das Volume gemountet ist.")
     log.info("  Log-Dir:      %s", LOG_DIR)
     log.info("  Calib-Cache:  %s (%.1f MB belegt, Limit %.0f GB)",
              CALIB_CACHE_DIR, _cache_size_bytes() / (1024 * 1024), CALIB_CACHE_MAX_GB)
@@ -643,8 +693,11 @@ async def health():
         pixinsight_running = len(pids) > 0
     except Exception:
         pass
+    wd_ok, wd_msg = _workdir_available()
     return {
-        "status": "ok" if pixinsight_ok and script_ok else "degraded",
+        "status": "ok" if pixinsight_ok and script_ok and wd_ok else "degraded",
+        "work_dir_available": wd_ok,
+        "work_dir_error": wd_msg or None,
         "pixinsight_found": pixinsight_ok,
         "pixinsight_running": pixinsight_running,
         "pixinsight_path": PIXINSIGHT_BIN,
@@ -654,7 +707,10 @@ async def health():
         "active_jobs": sum(1 for j in _jobs.values() if j.status == "running"),
         "total_jobs": len(_jobs),
         "shell_sim_available": True,
-        "calib_cache_files": sum(1 for f in CALIB_CACHE_DIR.iterdir() if f.is_file()),
+        "calib_cache_files": (
+            sum(1 for f in CALIB_CACHE_DIR.iterdir() if f.is_file())
+            if CALIB_CACHE_DIR.is_dir() else 0
+        ),
         "calib_cache_mb": round(_cache_size_bytes() / (1024 * 1024), 1),
         "calib_cache_max_gb": CALIB_CACHE_MAX_GB,
     }
@@ -666,6 +722,7 @@ async def calib_check(req: CalibCheckRequest):
     der Agent meldet, welche Dateien ihm fehlen. Treffer werden 'berührt'
     (mtime), damit das LRU-Aufräumen sie nicht verdrängt."""
     _check_token(req.token)
+    _require_workdir()
     missing: list[str] = []
     present = 0
     for item in req.files:
@@ -699,6 +756,7 @@ async def calib_upload(
     adressiert im Cache ab. Der Hash wird beim Empfang verifiziert —
     eine korrupte Übertragung landet nie im Cache."""
     _check_token(token)
+    _require_workdir()
     tmp_path = CALIB_CACHE_DIR / f".upload_{uuid.uuid4().hex}"
     h = hashlib.sha256()
     total = 0
@@ -769,6 +827,7 @@ async def process(
     PixInsight headless (oder die Shell-Simulation). Die Ergebnisse können
     später als ZIP heruntergeladen werden (GET /results/{job_id})."""
     _check_token(token)
+    _require_workdir()
 
     log.info("-" * 60)
     log.info("POST /process — neuer Job empfangen")

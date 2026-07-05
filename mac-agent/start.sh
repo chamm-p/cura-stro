@@ -88,6 +88,33 @@ load_token() {
     fi
 }
 
+# ─── NAS-Volume mounten (optional) ───
+# Zeigt WORK_DIR auf /Volumes/<Name>/…, wird das Volume bei Bedarf gemountet.
+# Dazu in .env setzen:
+#   WORK_DIR=/Volumes/Fotos/Astrofotos/cura-stro-jobs
+#   MOUNT_SMB_URL=smb://user:passwort@192.168.0.5/Fotos   (Gast: ohne user@)
+ensure_mount() {
+    local wd="${WORK_DIR:-$HOME/cura-stro-jobs}"
+    case "$wd" in
+        /Volumes/*)
+            local vol="/Volumes/$(echo "$wd" | cut -d/ -f3)"
+            if mount | grep -q " on $vol "; then
+                info "NAS-Volume gemountet: $vol"
+            elif [ -n "${MOUNT_SMB_URL:-}" ]; then
+                warn "Volume $vol nicht gemountet — mounte $MOUNT_SMB_URL …"
+                if osascript -e "mount volume \"$MOUNT_SMB_URL\"" >/dev/null 2>&1; then
+                    info "NAS-Volume gemountet: $vol"
+                else
+                    err "Mount fehlgeschlagen — Agent lehnt Jobs mit 503 ab, bis das Volume da ist"
+                fi
+            else
+                warn "WORK_DIR liegt auf $vol, das Volume ist aber nicht gemountet."
+                echo "  Entweder im Finder verbinden (⌘K) oder MOUNT_SMB_URL in .env setzen."
+            fi
+            ;;
+    esac
+}
+
 # ─── Prüfen ob Agent bereits läuft ───
 # Primär: Port-basiert (zuverlässig — auch wenn pgrep versagt)
 # Fallback: pgrep nach agent.py-Pfad
@@ -272,6 +299,7 @@ do_start() {
     ensure_venv
     ensure_deps
     load_token
+    ensure_mount
 
     local sim_note=""
     if [ "${1:-}" = "--sim" ]; then
@@ -339,6 +367,10 @@ Umgebungsvariablen:
   AGENT_TOKEN             Shared-Secret mit Backend
   PIXINSIGHT_BIN          Pfad zur PixInsight-Binary
   WORK_DIR                Temp-Verzeichnis (Default: ~/cura-stro-jobs)
+                          Kann aufs NAS zeigen: /Volumes/<Share>/…/cura-stro-jobs
+  MOUNT_SMB_URL           Optional: SMB-URL zum Auto-Mounten des NAS-Volumes
+                          (nur relevant, wenn WORK_DIR auf /Volumes/ liegt)
+  CALIB_CACHE_MAX_GB      Calib-Cache-Limit in GB (Default: 20)
   CURA_STRO_AGENT_LOG     Log-Datei-Pfad (Default: /tmp/cura-stro-agent.log)
 
 HELP

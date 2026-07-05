@@ -118,6 +118,23 @@ Umgebungsvariablen (direkt beim Start oder in einer `.env`-Datei neben `agent.py
 | `CALIB_CACHE_DIR` | `~/cura-stro-jobs/calib-cache` | Persistenter Calib-Cache (content-adressiert per SHA-256) |
 | `CALIB_CACHE_MAX_GB` | `20` | Cache-Limit — älteste Dateien werden per LRU verdrängt |
 
+**Work-Dir auf dem NAS (wenig Platz auf dem Mac):** `WORK_DIR` kann auf ein
+gemountetes NAS-Volume zeigen. In `.env` neben `agent.py`:
+
+```bash
+WORK_DIR=/Volumes/Fotos/Astrofotos/cura-stro-jobs
+# Optional: Auto-Mount durch start.sh, falls das Volume noch nicht da ist
+MOUNT_SMB_URL=smb://192.168.0.5/Fotos
+```
+
+Der Calib-Cache wandert automatisch mit (liegt unter `WORK_DIR/calib-cache`).
+Der Agent prüft vor jedem Job, ob das Volume wirklich gemountet ist — ist es
+das nicht, werden Jobs mit **503** abgelehnt statt still die lokale Platte
+unter `/Volumes/…` vollzuschreiben. Trade-off: alle PixInsight-Lese-/Schreib-
+zugriffe laufen übers LAN (1 GbE) — Verarbeitung wird spürbar langsamer.
+Die Zwischenframes werden zur Platzminimierung ohnehin früh gelöscht
+(calibrated/ direkt nach dem Alignment, aligned/ nach dem Stacking).
+
 **Calib-Cache:** Kalibrier-Frames/-Master werden vom Backend nur einmal
 hochgeladen (`POST /calib/check` → `POST /calib/upload`) und danach aus dem
 Cache wiederverwendet. Fertige Bias/Dark/Flat-Master wandern nach dem ersten
