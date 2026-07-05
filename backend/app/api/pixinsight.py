@@ -149,6 +149,16 @@ async def list_jobs(user: User = Depends(get_current_user)):
     return {"jobs": jobs}
 
 
+@router.post("/api/pixinsight/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str, user: User = Depends(get_current_user)):
+    """Bricht einen laufenden Job hart ab (Übertragung stoppen bzw.
+    PixInsight auf dem Agent killen)."""
+    try:
+        return await pixinsight.cancel_job(job_id, str(user.id))
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
 @router.delete("/api/pixinsight/jobs/{job_id}")
 async def remove_job(job_id: str, user: User = Depends(get_current_user)):
     """Entfernt einen abgeschlossenen/fehlgeschlagenen Job aus der Queue-Anzeige."""

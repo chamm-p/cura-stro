@@ -144,6 +144,10 @@ _backend_jobs: dict[str, BackendJob] = {}
 # Windows) übertragen weiterhin parallel.
 _transfer_locks: dict[str, asyncio.Lock] = {}
 
+# Task-Handles der laufenden _do_batch_transfer-Coroutines je Job-ID —
+# für den Abbruch eines Jobs, der noch überträgt (oder in der Queue wartet).
+_transfer_tasks: dict[str, "asyncio.Task"] = {}
+
 
 def _transfer_lock_for(base: str) -> asyncio.Lock:
     lock = _transfer_locks.get(base or "")
@@ -655,9 +659,11 @@ async def _do_batch_transfer(
     # Transfer-Lock je Agent: wartende Jobs bleiben 'queued', bis der
     # Vorgänger seine Übertragung abgeschlossen hat (release im finally).
     lock = _transfer_lock_for(job.agent_base)
-    await lock.acquire()
-    job.status = "starting"
+    acquired = False
     try:
+        await lock.acquire()   # kann bei Abbruch (queued) mit CancelledError enden
+        acquired = True
+        job.status = "starting"
         async with async_session() as db:
             # Observation und User laden
             obs = await db.get(Observation, uuid.UUID(obs_id))
@@ -780,6 +786,20 @@ async def _do_batch_transfer(
             job.id, agent_job_id, data.get("status"),
         )
 
+    except asyncio.CancelledError:
+        # Harter Abbruch eines noch übertragenden/wartenden Jobs.
+        logger.info("PixInsight [job=%s]: Übertragung abgebrochen", job.id)
+        job.status = "cancelled"
+        job.error = "Vom Nutzer abgebrochen"
+        try:
+            async with async_session() as db:
+                obs = await db.get(Observation, uuid.UUID(obs_id))
+                if obs and obs.status == "in_bearbeitung":
+                    obs.status = "raw"
+                    await db.commit()
+        except Exception:
+            pass
+        raise
     except Exception as e:
         logger.exception("PixInsight [job=%s]: Fehler im Hintergrund-Task", job.id)
         job.status = "failed"
@@ -795,7 +815,9 @@ async def _do_batch_transfer(
             pass
     finally:
         tmpdir_obj.cleanup()
-        lock.release()
+        if acquired:
+            lock.release()
+        _transfer_tasks.pop(job.id, None)
 
 
 async def trigger_batch(
@@ -854,8 +876,9 @@ async def trigger_batch(
     )
     _backend_jobs[job.id] = job
 
-    # Hintergrund-Task starten (nicht-blockierend)
-    asyncio.create_task(_do_batch_transfer(
+    # Hintergrund-Task starten (nicht-blockierend) + Handle merken, damit ein
+    # noch nicht übertragener Job (queued/starting) abgebrochen werden kann.
+    _transfer_tasks[job.id] = asyncio.create_task(_do_batch_transfer(
         job, str(obs.id), str(user.id), mode, calib_dirs, frame_info,
     ))
 
@@ -1119,6 +1142,71 @@ def list_backend_jobs() -> list[dict[str, Any]]:
         j.to_dict()
         for j in sorted(_backend_jobs.values(), key=lambda j: j.created_at, reverse=True)
     ]
+
+
+async def cancel_job(job_id: str, user_id: str) -> dict[str, Any]:
+    """Bricht einen laufenden Job HART ab — je nach Phase:
+
+    - queued/starting (überträgt noch): den Transfer-Task canceln (Lock wird
+      freigegeben, tmp aufgeräumt, Observation → raw).
+    - sent/running (auf dem Agent): dem Agent POST /jobs/{id}/cancel schicken
+      → PixInsight wird gekillt; Job → cancelled, Observation → raw, Agent-
+      Job restlos aufräumen.
+    - bereits completed/failed/cancelled: nichts zu tun.
+    """
+    bjob = _backend_jobs.get(job_id)
+    if not bjob or bjob.user_id != user_id:
+        raise ValueError(f"Job {job_id} nicht gefunden")
+
+    if bjob.status in ("completed", "failed", "cancelled"):
+        return {"job_id": job_id, "status": bjob.status, "note": "bereits beendet"}
+
+    # Phase 1: überträgt noch / wartet in der Queue → Task canceln.
+    if bjob.status in ("queued", "starting"):
+        task = _transfer_tasks.get(job_id)
+        if task and not task.done():
+            task.cancel()
+        bjob.status = "cancelled"
+        bjob.error = "Vom Nutzer abgebrochen"
+        # Observation-Reset erledigt der Task (CancelledError-Handler);
+        # zur Sicherheit hier ebenfalls.
+        try:
+            async with async_session() as db:
+                obs = await db.get(Observation, uuid.UUID(bjob.obs_id))
+                if obs and obs.status == "in_bearbeitung":
+                    obs.status = "raw"
+                    await db.commit()
+        except Exception:
+            pass
+        logger.info("PixInsight: Job %s abgebrochen (Übertragungsphase)", job_id[:8])
+        return {"job_id": job_id, "status": "cancelled"}
+
+    # Phase 2: läuft auf dem Agent → dort killen.
+    if bjob.agent_job_id:
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(
+                    await _agent_url(f"/jobs/{bjob.agent_job_id}/cancel", bjob.agent_base),
+                    params={"token": await _agent_token()},
+                )
+                if resp.status_code not in (200, 404):
+                    resp.raise_for_status()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("PixInsight: Agent-Cancel fehlgeschlagen (%s) — markiere trotzdem abgebrochen", e)
+    bjob.status = "cancelled"
+    bjob.error = "Vom Nutzer abgebrochen"
+    try:
+        async with async_session() as db:
+            obs = await db.get(Observation, uuid.UUID(bjob.obs_id))
+            if obs and obs.status == "in_bearbeitung":
+                obs.status = "raw"
+                await db.commit()
+    except Exception:
+        pass
+    if bjob.agent_job_id:
+        await _cleanup_agent_job(bjob.agent_job_id, bjob.agent_base)
+    logger.info("PixInsight: Job %s abgebrochen (Agent-Verarbeitung gekillt)", job_id[:8])
+    return {"job_id": job_id, "status": "cancelled"}
 
 
 def remove_backend_job(job_id: str, user_id: str) -> bool:

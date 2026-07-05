@@ -76,6 +76,17 @@ function PixiQueue({ onDone }: { onDone: () => void }) {
     setDetailFor(null)
     setJobs((js) => js.filter((j) => j.id !== id))
   }
+  const [cancelling, setCancelling] = useState<Set<string>>(new Set())
+  const cancelJob = async (id: string) => {
+    if (!confirm('Diesen Job hart abbrechen? Läuft PixInsight bereits, wird der Prozess gekillt.')) return
+    setCancelling((s) => new Set(s).add(id))
+    try {
+      await api.post(`/api/pixinsight/jobs/${id}/cancel`)
+      setJobs((js) => js.map((j) => (j.id === id ? { ...j, status: 'cancelled' } : j)))
+      onDone()
+    } catch { /* ignore */ }
+    finally { setCancelling((s) => { const n = new Set(s); n.delete(id); return n }) }
+  }
 
   const active = jobs.filter((j) => PI_ACTIVE.includes(j.status))
   const failed = jobs.filter((j) => j.status === 'failed').slice(0, 4)
@@ -94,9 +105,13 @@ function PixiQueue({ onDone }: { onDone: () => void }) {
           <Cpu className="h-3.5 w-3.5" /> PixInsight-Queue
         </span>
         {active.map((j) => (
-          <span key={j.id} className="flex items-center gap-1.5 rounded-full bg-blue-500/20 px-2.5 py-1 text-blue-200">
+          <span key={j.id} className="flex items-center gap-1.5 rounded-full bg-blue-500/20 py-1 pl-2.5 pr-1 text-blue-200">
             {j.status === 'running' && <Loader2 className="h-3 w-3 animate-spin" />}
             {jobLabel(j)} · {PI_LABEL[j.status] || j.status}
+            <button onClick={() => cancelJob(j.id)} disabled={cancelling.has(j.id)} title="Job hart abbrechen"
+              className="ml-0.5 rounded-full p-0.5 text-blue-300 hover:bg-red-500/30 hover:text-red-200 disabled:opacity-40">
+              {cancelling.has(j.id) ? <Loader2 className="h-3 w-3 animate-spin" /> : <X className="h-3 w-3" />}
+            </button>
           </span>
         ))}
         {failed.map((j) => (

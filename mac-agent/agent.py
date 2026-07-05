@@ -183,12 +183,15 @@ class Job:
     result_zip_size: int = 0
     input_cleaned: bool = False   # Input-Verzeichnis wurde gelöscht
     output_cleaned: bool = False  # Output-Verzeichnis wurde gelöscht
+    cancelled: bool = False       # Vom Backend/GUI hart abgebrochen
 
     def to_dict(self) -> dict:
         return asdict(self)
 
 
 _jobs: dict[str, Job] = {}
+# Laufende PixInsight-Subprozesse je Job-ID — für den harten Abbruch.
+_procs: dict[str, "asyncio.subprocess.Process"] = {}
 
 # WICHTIG: Das Semaphore darf NICHT beim Modul-Import entstehen. Auf
 # Python 3.9 bindet sich asyncio.Semaphore() an den Event-Loop zum
@@ -625,6 +628,15 @@ def _kill_existing_pixinsight() -> None:
 async def _run_pixinsight(job: Job) -> None:
     """Führt PixInsight headless mit dem Batch-Skript aus."""
     async with _get_semaphore():
+        # Während der Job in der Agent-Queue wartete, könnte er abgebrochen
+        # worden sein → gar nicht erst PixInsight starten.
+        if job.cancelled:
+            job.status = "cancelled"
+            job.error = "Vom Nutzer abgebrochen (vor Start)"
+            job.completed_at = _now_iso()
+            log.info("Job %s — ABGEBROCHEN vor Start", job.id[:8])
+            _cleanup_input(job)
+            return
         job.status = "running"
         job.started_at = _now_iso()
         log.info("=" * 60)
@@ -679,9 +691,21 @@ async def _run_pixinsight(job: Job) -> None:
                 stderr=subprocess.STDOUT,
             )
             job.pid = proc.pid
+            _procs[job.id] = proc
             log.info("  PixInsight PID: %d — warte auf Abschluss …", proc.pid)
             rc = await proc.wait()
             job.return_code = rc
+            _procs.pop(job.id, None)
+
+            # Wurde der Job zwischenzeitlich hart abgebrochen? → nicht als
+            # Fehler/Ergebnis werten, nur aufräumen.
+            if job.cancelled:
+                job.status = "cancelled"
+                job.error = "Vom Nutzer abgebrochen"
+                log.info("Job %s — ABGEBROCHEN (PixInsight gekillt)", job.id[:8])
+                _cleanup_input(job)
+                _cleanup_output(job)
+                return
 
             # PixInsight-Log auf Agent-Konsole ausgeben (für Debugging)
             _print_pi_log(log_file)
@@ -1074,13 +1098,52 @@ async def list_jobs(token: str = ""):
     return {"jobs": [j.to_dict() for j in _jobs.values()]}
 
 
+@app.post("/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str, token: str = ""):
+    """Bricht einen Job HART ab: killt den laufenden PixInsight-Prozess
+    (SIGKILL/TerminateProcess). Wartende Jobs starten gar nicht erst.
+    _run_pixinsight räumt danach Input+Output des Jobs auf."""
+    _check_token(token)
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Job nicht gefunden")
+    if job.status in ("completed", "failed", "cancelled"):
+        return {"job_id": job_id, "status": job.status, "note": "bereits beendet"}
+    job.cancelled = True
+    proc = _procs.get(job_id)
+    if proc is not None and proc.returncode is None:
+        log.info("POST /jobs/%s/cancel — kille PixInsight (PID %s)", job_id[:8], job.pid)
+        try:
+            proc.kill()
+        except Exception as e:  # noqa: BLE001
+            log.warning("  proc.kill fehlgeschlagen: %s — Fallback _kill_existing", e)
+            _kill_existing_pixinsight()
+    else:
+        # Job wartet noch (queued) oder kein Prozess → als Sicherheit alle
+        # hängenden PixInsight-Instanzen killen, Status direkt setzen.
+        log.info("POST /jobs/%s/cancel — kein laufender Prozess (Status %s)", job_id[:8], job.status)
+        _kill_existing_pixinsight()
+        job.status = "cancelled"
+        job.error = "Vom Nutzer abgebrochen"
+        job.completed_at = _now_iso()
+    return {"job_id": job_id, "status": "cancelled"}
+
+
 @app.delete("/jobs/{job_id}")
 async def delete_job(job_id: str, token: str = ""):
-    """Entfernt einen Job und seine Temp-Dateien (restloses Aufräumen)."""
+    """Entfernt einen Job und seine Temp-Dateien (restloses Aufräumen).
+    Läuft der Job noch, wird er vorher hart abgebrochen."""
     _check_token(token)
     job = _jobs.pop(job_id, None)
     if not job:
         raise HTTPException(404, "Job nicht gefunden")
+    proc = _procs.get(job_id)
+    if proc is not None and proc.returncode is None:
+        job.cancelled = True
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
     job_dir = Path(job.work_input).parent
     if job_dir.exists():
         shutil.rmtree(job_dir, ignore_errors=True)
