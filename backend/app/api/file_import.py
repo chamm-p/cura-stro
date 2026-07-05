@@ -1,0 +1,173 @@
+"""Datei-Import (Drag & Drop) — Subs aus beliebiger Quelle einsortieren.
+
+Ergänzt den ASIAir-Direktimport: der Nutzer zieht einen Ordnerbaum in den
+Browser, dessen Struktur immer ``…/<Objektname>/<Gerätename>/*.fit`` ist
+(z. B. ``Astrofotos/Raw-Files/C4/RC71/Light_C4_300.0s_….fit``).
+
+Ablauf:
+    1. POST /api/import/preview — nur die relativen Pfade (kein Inhalt).
+       Gruppiert nach (Objekt, Gerät), matcht Objekt gegen den Katalog und
+       Gerät gegen die Teleskope, meldet unparsbare Dateien.
+    2. POST /api/import/file — eine Datei pro Request (multipart), mit
+       object_name/device_name aus der (ggf. korrigierten) Vorschau.
+       Nutzt dieselbe Pipeline wie der ASIAir-Import: find-or-create
+       Observation, Ablage unter RAW/<Objekt>/<Gerät>/, SubFrame-Zeile
+       mit Dublettenschutz. Das Frontend lädt sequenziell hoch und hat
+       damit einen exakten Fortschritt.
+"""
+
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path, PurePosixPath
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.asiair import _catalog_map, _upsert_observation
+from app.api.deps import get_current_user
+from app.database import get_db
+from app.models.observing import Telescope
+from app.models.user import User
+from app.services import archive
+from app.services import asiair as asi
+
+router = APIRouter(prefix="/api/import", tags=["import"])
+
+RAW_EXTS = {".fit", ".fits", ".fts"}
+
+
+def _split_group(rel_path: str) -> tuple[str, str, str]:
+    """Zerlegt einen relativen Pfad in (Objekt, Gerät, Dateiname).
+
+    Regel: die letzten beiden Ordner vor der Datei sind Objekt/Gerät.
+    Fehlt Tiefe (Datei direkt in einem Ordner oder lose), bleiben die
+    Felder leer — der Nutzer korrigiert sie in der Vorschau."""
+    parts = [p for p in rel_path.replace("\\", "/").split("/") if p]
+    name = parts[-1] if parts else ""
+    device = parts[-2] if len(parts) >= 3 else ""
+    obj = parts[-3] if len(parts) >= 3 else (parts[-2] if len(parts) == 2 else "")
+    return obj, device, name
+
+
+async def _telescope_by_name(db: AsyncSession, user: User, name: str) -> Telescope | None:
+    if not name.strip():
+        return None
+    rows = await db.scalars(select(Telescope).where(Telescope.user_id == user.id))
+    for t in rows:
+        if (t.name or "").strip().lower() == name.strip().lower():
+            return t
+    return None
+
+
+class PreviewBody(BaseModel):
+    paths: list[str]
+
+
+@router.post("/preview")
+async def preview(
+    body: PreviewBody,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Gruppiert die Pfadliste nach (Objekt, Gerät) und liefert Matching-Infos."""
+    cat = await _catalog_map(db)
+    scopes = list(await db.scalars(select(Telescope).where(Telescope.user_id == user.id)))
+    scope_by_lower = {(t.name or "").strip().lower(): t for t in scopes}
+
+    groups: dict[tuple[str, str], dict] = {}
+    skipped: list[dict] = []
+    for p in body.paths:
+        obj, dev, name = _split_group(p)
+        if PurePosixPath(name).suffix.lower() not in RAW_EXTS:
+            skipped.append({"path": p, "reason": "kein FIT (.fit/.fits/.fts)"})
+            continue
+        parsed = asi.parse_frame_filename(name)
+        g = groups.setdefault((obj, dev), {
+            "object": obj, "device": dev, "files": 0,
+            "filters": {}, "nights": set(), "unparsed": 0,
+        })
+        g["files"] += 1
+        if parsed:
+            fn = parsed.filter_name or "—"
+            g["filters"][fn] = g["filters"].get(fn, 0) + 1
+            if parsed.captured_at:
+                g["nights"].add(parsed.captured_at.date().isoformat())
+        else:
+            g["unparsed"] += 1
+
+    out = []
+    for (obj, dev), g in sorted(groups.items()):
+        match = cat.get(asi.normalize_object(obj)) if obj else None
+        scope = scope_by_lower.get(dev.strip().lower()) if dev else None
+        warnings = []
+        if not obj:
+            warnings.append("Objektname fehlt (Ordnertiefe zu gering) — bitte eintragen.")
+        if not dev:
+            warnings.append("Gerätename fehlt — bitte eintragen.")
+        elif not scope:
+            warnings.append(f"„{dev}“ ist nicht als Teleskop angelegt — Ablage unter „Unbekannt“.")
+        if g["unparsed"]:
+            warnings.append(f"{g['unparsed']} Datei(en) ohne ASIAir-Namensschema (werden als Light ohne Metadaten importiert).")
+        out.append({
+            "object": obj, "device": dev, "files": g["files"],
+            "matched_ident": match.ident if match else None,
+            "matched_name": match.name if match else None,
+            "matched_telescope": scope.name if scope else None,
+            "filters": [{"filter": k, "subs": v} for k, v in sorted(g["filters"].items())],
+            "nights": len(g["nights"]),
+            "warnings": warnings,
+        })
+    return {"groups": out, "skipped": skipped}
+
+
+@router.post("/file")
+async def import_file(
+    file: UploadFile = File(...),
+    object_name: str = Form(...),
+    device_name: str = Form(default=""),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Importiert genau eine Datei in die Aufnahme (Objekt, Gerät)."""
+    obj_label = object_name.strip()
+    if not obj_label:
+        raise HTTPException(400, "object_name fehlt")
+
+    cat = (await _catalog_map(db)).get(asi.normalize_object(obj_label))
+    scope = await _telescope_by_name(db, user, device_name)
+    obs = await _upsert_observation(
+        db, user, cat, cat.ident if cat else obj_label,
+        scope.id if scope else None,
+    )
+
+    filename = PurePosixPath((file.filename or "upload.fit").replace("\\", "/")).name
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(filename).suffix) as tmp:
+            tmp_path = tmp.name
+            while chunk := await file.read(1024 * 1024):
+                tmp.write(chunk)
+        result = await archive.import_files(
+            db, user, obs, [(filename, tmp_path)], source="upload",
+        )
+        await db.commit()
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        await db.rollback()
+        raise HTTPException(500, f"Import fehlgeschlagen: {e}")
+    finally:
+        if tmp_path:
+            Path(tmp_path).unlink(missing_ok=True)
+
+    first = result["results"][0] if result["results"] else {"status": "error", "error": "leer"}
+    return {
+        "file": filename,
+        "status": first.get("status"),
+        "error": first.get("error"),
+        "observation_id": str(obs.id),
+        "dest": result.get("dest"),
+    }

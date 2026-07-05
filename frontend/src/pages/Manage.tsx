@@ -1,10 +1,11 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
-import { ListChecks, Trash2, Plus, Loader2, Image as ImageIcon, ChevronUp, ChevronDown, StickyNote, X, Layers, Radio, AlertTriangle, Cpu } from 'lucide-react'
+import { ListChecks, Trash2, Plus, Loader2, Image as ImageIcon, ChevronUp, ChevronDown, StickyNote, X, Layers, Radio, AlertTriangle, Cpu, UploadCloud } from 'lucide-react'
 import api from '../services/api'
 import Layout from '../components/Layout'
 import SubsModal from '../components/SubsModal'
 import ResultsModal from '../components/ResultsModal'
 import AsiairImportModal from '../components/AsiairImportModal'
+import FileImportModal from '../components/FileImportModal'
 
 interface Obs {
   id: string; catalog_object_id: string | null
@@ -109,6 +110,7 @@ export default function Manage() {
   const [notesFor, setNotesFor] = useState<Obs | null>(null)
   const [deleteFor, setDeleteFor] = useState<Obs | null>(null)
   const [asiairOpen, setAsiairOpen] = useState(false)
+  const [fileImportOpen, setFileImportOpen] = useState(false)
   const [sortField, setSortField] = useState<string | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
@@ -180,6 +182,9 @@ export default function Manage() {
         </button>
         <button onClick={() => setAsiairOpen(true)} className="flex items-center gap-1.5 rounded-lg border border-white/10 px-3.5 py-2 text-sm text-slate-200 hover:bg-white/10" title="Subs direkt von der ASIAir importieren">
           <Radio className="h-4 w-4" /> Von ASIAir
+        </button>
+        <button onClick={() => setFileImportOpen(true)} className="flex items-center gap-1.5 rounded-lg border border-white/10 px-3.5 py-2 text-sm text-slate-200 hover:bg-white/10" title="FIT-Dateien per Drag & Drop importieren (…/<Objekt>/<Gerät>/*.fit)">
+          <UploadCloud className="h-4 w-4" /> Dateien
         </button>
       </div>
 
@@ -290,6 +295,7 @@ export default function Manage() {
         />
       )}
       {asiairOpen && <AsiairImportModal onClose={() => setAsiairOpen(false)} onImported={load} />}
+      {fileImportOpen && <FileImportModal onClose={() => setFileImportOpen(false)} onImported={load} />}
       {deleteFor && (
         <DeleteModal
           obs={deleteFor}
