@@ -124,6 +124,10 @@ class BackendJob:
     # und Transfer-Statistik (im Cache vorhanden vs. hochgeladen).
     calib_set_hashes: dict[str, str] = field(default_factory=dict)
     calib_transfer: dict[str, Any] | None = None
+    # Ergebnis der Finalisierung — damit ein späterer UI-Poll (nachdem die
+    # Hintergrund-Queue schon abgeholt hat) die echten Zahlen bekommt statt
+    # eines leeren „Bereits abgeschlossen".
+    result: dict[str, Any] | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -835,6 +839,8 @@ async def _finalize_job(bjob: BackendJob) -> dict[str, Any]:
     lock = _finalize_locks.setdefault(bjob.id, asyncio.Lock())
     async with lock:
         if bjob.status == "completed":
+            if bjob.result:
+                return {**bjob.result, "message": "Bereits abgeschlossen"}
             return {"job_id": bjob.id, "status": "vorbereitet", "message": "Bereits abgeschlossen"}
 
         token = await _agent_token()
@@ -888,7 +894,7 @@ async def _finalize_job(bjob: BackendJob) -> dict[str, Any]:
         if bjob.agent_job_id:
             await _cleanup_agent_job(bjob.agent_job_id)
 
-        return {
+        bjob.result = {
             "job_id": bjob.id,
             "status": "vorbereitet",
             "result_files": written,
@@ -897,6 +903,7 @@ async def _finalize_job(bjob: BackendJob) -> dict[str, Any]:
             "registered": registered,
             "calib_masters_saved": harvested,
         }
+        return bjob.result
 
 
 async def poll_job_results(
@@ -956,8 +963,11 @@ async def poll_job_results(
         # Hintergrund-Queue könnte parallel dasselbe versuchen)
         return await _finalize_job(bjob)
 
-    # Bereits abgeschlossen
+    # Bereits abgeschlossen (z. B. von der Hintergrund-Queue abgeholt) —
+    # echte Ergebniszahlen zurückgeben, nicht nur eine leere Meldung.
     if bjob.status == "completed":
+        if bjob.result:
+            return {**bjob.result, "message": "Bereits abgeschlossen"}
         return {"job_id": job_id, "status": "vorbereitet", "message": "Bereits abgeschlossen"}
 
     return {"job_id": job_id, "status": bjob.status}

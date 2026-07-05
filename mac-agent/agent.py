@@ -626,9 +626,13 @@ async def _run_pixinsight(job: Job) -> None:
                     _cleanup_input(job)
                 else:
                     job.status = "failed"
-                    job.error = "PixInsight lieferte keine Ergebnis-Dateien"
-                    log.error("Job %s — FEHLER: keine Ergebnis-Dateien (exit 0, aber Output leer)",
-                              job.id[:8])
+                    # Gemeint sind die MASTER-Dateien des Stackings — das
+                    # manuell entwickelte Einzelbild entsteht später und wird
+                    # hier NICHT erwartet.
+                    job.error = ("PixInsight hat keine Master-Dateien erzeugt "
+                                 "(Stacking unvollständig) — siehe cura_batch-Log")
+                    log.error("Job %s — FEHLER: keine Master im Output (exit 0). "
+                              "Ursache steht im cura_batch.js-Log oben.", job.id[:8])
             else:
                 job.status = "failed"
                 job.error = f"PixInsight exit code {rc} — siehe Log: {log_file}"

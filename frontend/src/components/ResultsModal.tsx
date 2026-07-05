@@ -147,10 +147,10 @@ export default function ResultsModal({
               setPiResultCount(poll.data.result_count || 0)
               setPiMsg(
                 poll.data.result_count > 0
-                  ? `${poll.data.result_count} Ergebnis-Datei(en) nach Developer/ geschrieben. Status → „vorbereitet".`
-                  : 'Batch abgeschlossen, aber keine Ergebnis-Dateien gefunden.'
+                  ? `${poll.data.result_count} Master nach Developer/ geschrieben. Status → „vorbereitet" — das fertige Bild entwickelst du wie gewohnt manuell.`
+                  : 'Batch abgeschlossen — Ergebnisse wurden bereits im Hintergrund übernommen (siehe Liste unten).'
               )
-              onChanged()
+              load(); onChanged()
             } else if (poll.data.status === 'failed') {
               setPiStatus('error')
               setErr(poll.data.error || 'Batch fehlgeschlagen.')
@@ -193,8 +193,12 @@ export default function ResultsModal({
       if (poll.data.status === 'vorbereitet') {
         setPiStatus('done')
         setPiResultCount(poll.data.result_count || 0)
-        setPiMsg(`${poll.data.result_count || 0} Ergebnis-Datei(en) nach Developer/ geschrieben.`)
-        onChanged()
+        setPiMsg(
+          (poll.data.result_count || 0) > 0
+            ? `${poll.data.result_count} Master nach Developer/ geschrieben — das fertige Bild entwickelst du wie gewohnt manuell.`
+            : 'Batch abgeschlossen — Ergebnisse wurden bereits im Hintergrund übernommen (siehe Liste unten).'
+        )
+        load(); onChanged()
       } else if (poll.data.status === 'failed') {
         setPiStatus('error')
         setErr(poll.data.error || 'Batch fehlgeschlagen.')
