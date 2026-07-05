@@ -85,12 +85,15 @@ async def lifespan(app: FastAPI):
             await seed_catalog(db)
     except Exception:
         logger.exception("⚠️ Katalog-Seeding fehlgeschlagen")
-    # Hintergrund-Tasks: meteoblue-Wolken (1×/Tag) + Developer-Watch-Folder.
+    # Hintergrund-Tasks: meteoblue-Wolken (1×/Tag) + Developer-Watch-Folder
+    # + PixInsight-Queue (holt fertige Agent-Jobs automatisch ab).
     from app.services.clouds import daily_refresh_loop
+    from app.services.pixinsight import agent_poll_loop
     from app.services.results import watch_loop
 
     cloud_task = asyncio.create_task(daily_refresh_loop())
     watch_task = asyncio.create_task(watch_loop())
+    pixi_task = asyncio.create_task(agent_poll_loop())
     # MCP-Session-Manager mitlaufen lassen (Mount führt eigene Lifespans nicht aus).
     async with contextlib.AsyncExitStack() as stack:
         await stack.enter_async_context(mcp_server.session_manager.run())
@@ -99,6 +102,7 @@ async def lifespan(app: FastAPI):
         finally:
             cloud_task.cancel()
             watch_task.cancel()
+            pixi_task.cancel()
 
 
 app = FastAPI(title=settings.app_name, version=settings.app_version, lifespan=lifespan)

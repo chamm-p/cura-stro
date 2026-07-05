@@ -4,10 +4,11 @@ Ergebnisbilder liegen im NAS-Archiv unter ``Developer/<Objekt>/<Gerät>/``.
 Der Watch-Folder scannt diese Ordner und hängt neu aufgetauchte Master
 automatisch an die passende Aufnahme (Status → entwickelt).
 
-Zusätzlich wird der ``Prepared/<Objekt>/<Gerät>/``-Ordner gescannt, der die
-Ergebnisse des automatischen WBPP-Batches enthält (Status → vorbereitet).
-Der Wechsel von 'vorbereitet' → 'entwickelt' erfolgt erst, wenn der Nutzer
-das manuell entwickelte Bild in den Developer-Ordner legt."""
+Die Batch-Master des PixInsight-Agents landen ebenfalls dort, werden aber
+schon beim Schreiben als ResultFile (source='batch') registriert — dadurch
+zählt scan_import sie nicht als 'neu' und der Status bleibt 'vorbereitet'.
+Der Wechsel auf 'entwickelt' erfolgt erst, wenn der Nutzer sein manuell
+entwickeltes Bild in den Developer-Ordner legt (oder hochlädt)."""
 
 from __future__ import annotations
 

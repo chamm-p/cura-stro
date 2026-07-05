@@ -66,16 +66,24 @@ from app.database import async_session
 from app.models.calib import CalibFile, CalibMaster
 from app.models.observation import Observation
 from app.models.observing import Setup
+from app.models.result_file import ResultFile
 from app.models.subframe import SubFrame
 from app.models.user import User
 from app.services import archive
+from app.services import results as results_svc
 
 logger = logging.getLogger("uvicorn.error")
 _cfg = get_settings()
 
-# Verzeichnisname für WBPP-Ergebnisse (Master-Files, kalibrierte Frames).
-# Liegen im Archiv unter Prepared/<Objekt>/<Gerät>/.
-PREPARED_FOLDER = "Prepared"
+# Batch-Ergebnisse (per-Filter-Master) landen direkt im Developer-Baum:
+# Developer/<Objekt>/<Gerät>/ (results_svc.developer_reldir). Sie werden
+# dabei sofort als ResultFile registriert, damit der Watch-Folder sie kennt
+# und der Status NICHT auf 'entwickelt' springt — das passiert erst, wenn
+# der Nutzer sein manuell entwickeltes Bild dort ablegt.
+
+# Bias/Dark/Flat-Master sind KEINE Objekt-Ergebnisse — sie werden vor der
+# Registrierung abgezweigt (→ Calib/Masters/) bzw. übersprungen.
+CALIB_MASTER_NAMES = {"master_bias.xisf", "master_dark.xisf", "master_flat.xisf"}
 
 # Fertige Kalibrier-Master (Bias/Dark/Flat) landen hier auf dem NAS und
 # werden bei Folgejobs statt der Roh-Subs an den Agent geschickt.
@@ -142,13 +150,6 @@ async def raw_reldir(db: AsyncSession, user: User, obs: Observation) -> str:
     )
 
 
-async def prepared_reldir(db: AsyncSession, user: User, obs: Observation) -> str:
-    """Relativer Pfad zum Prepared-Verzeichnis der Aufnahme."""
-    return archive.reldir(
-        PREPARED_FOLDER,
-        await archive.object_label(db, obs),
-        await archive.device_label(db, obs),
-    )
 
 
 async def _get_calibration_dirs(db: AsyncSession, obs: Observation) -> dict[str, str]:
@@ -464,25 +465,55 @@ async def _extract_zip(zip_bytes: bytes, dest_dir: Path) -> list[str]:
     return names
 
 
-async def _write_prepared_to_storage(
-    user: User, prepared_rel: str, local_dir: Path
+async def _write_results_to_storage(
+    user: User, dev_rel: str, local_dir: Path
 ) -> list[str]:
     """Schreibt die Ergebnis-Dateien vom lokalen Temp-Verzeichnis ins
-    Storage (NAS) unter Prepared/<Obj>/<Ger>/."""
+    Storage (NAS) unter Developer/<Obj>/<Ger>/."""
     storage = archive.get_storage(user)
-    await asyncio.to_thread(storage.makedirs, prepared_rel)
+    await asyncio.to_thread(storage.makedirs, dev_rel)
     written: list[str] = []
     for f in sorted(local_dir.rglob("*")):
         if not f.is_file():
             continue
         rel_within = f.relative_to(local_dir)
-        rel = f"{prepared_rel}/{rel_within}"
+        rel = f"{dev_rel}/{rel_within}"
         try:
             await asyncio.to_thread(storage.put, rel, str(f))
             written.append(str(rel_within))
         except Exception as e:
             logger.warning("Konnte Ergebnis-Datei nicht schreiben: %s — %s", rel_within, e)
     return written
+
+
+async def _register_results(
+    db: AsyncSession, user: User, obs: Observation, dev_rel: str, local_dir: Path
+) -> int:
+    """Registriert die Batch-Master (Top-Level-Bilddateien) als ResultFile.
+
+    Wichtig fürs Zusammenspiel mit dem Watch-Folder: weil die Dateien schon
+    registriert sind, wertet scan_import sie nicht als 'neu' und der Status
+    springt nicht auf 'entwickelt'."""
+    storage = archive.get_storage(user)
+    known = set(await db.scalars(
+        select(ResultFile.filename).where(ResultFile.observation_id == obs.id)
+    ))
+    added = 0
+    for f in sorted(local_dir.iterdir()):
+        if not f.is_file() or f.name in known or f.name in CALIB_MASTER_NAMES:
+            continue
+        if f.suffix.lower() not in results_svc.RESULT_EXTS:
+            continue
+        rel = f"{dev_rel}/{f.name}"
+        db.add(ResultFile(
+            user_id=user.id, observation_id=obs.id, filename=f.name,
+            archive_path=storage.full_path(rel), file_size=f.stat().st_size,
+            source="batch",
+        ))
+        added += 1
+    if added:
+        await db.flush()
+    return added
 
 
 async def _harvest_calib_masters(
@@ -789,12 +820,91 @@ async def trigger_batch(
     }
 
 
+# Pro Job ein Lock: UI-Poll und Hintergrund-Queue dürfen nicht gleichzeitig
+# finalisieren (doppelter Download / doppelte Registrierung).
+_finalize_locks: dict[str, asyncio.Lock] = {}
+
+
+async def _finalize_job(bjob: BackendJob) -> dict[str, Any]:
+    """Holt die Ergebnisse eines abgeschlossenen Agent-Jobs ab.
+
+    Lädt das Ergebnis-ZIP, zweigt Bias/Dark/Flat-Master ab (→ Calib/Masters/),
+    schreibt den Rest nach Developer/<Obj>/<Ger>/, registriert die Master als
+    ResultFile, setzt den Status auf 'vorbereitet' und räumt den Agent auf.
+    Nutzt eine eigene DB-Session — läuft aus dem UI-Poll UND der Queue."""
+    lock = _finalize_locks.setdefault(bjob.id, asyncio.Lock())
+    async with lock:
+        if bjob.status == "completed":
+            return {"job_id": bjob.id, "status": "vorbereitet", "message": "Bereits abgeschlossen"}
+
+        token = await _agent_token()
+        try:
+            async with httpx.AsyncClient(timeout=600.0) as client:
+                resp = await client.get(
+                    await _agent_url(f"/results/{bjob.agent_job_id}"),
+                    params={"token": token},
+                )
+                if resp.status_code == 409:
+                    return {"job_id": bjob.id, "status": "running", "message": "Ergebnisse werden noch gepackt …"}
+                resp.raise_for_status()
+                zip_bytes = resp.content
+        except httpx.ConnectError:
+            return {"job_id": bjob.id, "status": "error", "error": "Agent nicht erreichbar für Download"}
+        except httpx.HTTPStatusError as e:
+            return {"job_id": bjob.id, "status": "error", "error": f"Download fehlgeschlagen: {e.response.status_code}"}
+
+        async with async_session() as db:
+            obs = await db.get(Observation, uuid.UUID(bjob.obs_id))
+            user = await db.get(User, uuid.UUID(bjob.user_id))
+            if not obs or not user:
+                return {"job_id": bjob.id, "status": "error", "error": "Observation oder User nicht gefunden"}
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp_path = Path(tmpdir)
+                extracted = await _extract_zip(zip_bytes, tmp_path)
+                if not extracted:
+                    return {"job_id": bjob.id, "status": "error", "error": "Ergebnis-ZIP ist leer"}
+
+                # Frisch gebaute Bias/Dark/Flat-Master aufs NAS legen
+                # (Calib/Masters/) und aus dem Ergebnis entfernen.
+                harvested = await _harvest_calib_masters(db, user, bjob, tmp_path)
+
+                # Rest → Developer/<Obj>/<Ger>/ + als Ergebnis registrieren
+                dev_rel = await results_svc.developer_reldir(db, user, obs)
+                written = await _write_results_to_storage(user, dev_rel, tmp_path)
+                registered = await _register_results(db, user, obs, dev_rel, tmp_path)
+
+            obs.status = "vorbereitet"
+            obs.is_new = False
+            await db.commit()
+
+        bjob.status = "completed"
+        logger.info(
+            "PixInsight [job=%s]: fertig — %d Datei(en) → %s (%d als Ergebnis registriert)",
+            bjob.id, len(written), dev_rel, registered,
+        )
+
+        # Agent-Job restlos aufräumen (Input + Output auf dem Mac löschen)
+        if bjob.agent_job_id:
+            await _cleanup_agent_job(bjob.agent_job_id)
+
+        return {
+            "job_id": bjob.id,
+            "status": "vorbereitet",
+            "result_files": written,
+            "result_count": len(written),
+            "developer_dir": dev_rel,
+            "registered": registered,
+            "calib_masters_saved": harvested,
+        }
+
+
 async def poll_job_results(
     db: AsyncSession, user: User, obs: Observation, job_id: str
 ) -> dict[str, Any]:
     """Fragt den Job-Status ab.  Wenn der Job auf dem Agent abgeschlossen ist,
-    lädt er die Ergebnis-ZIP herunter, entpackt sie und schreibt die Dateien
-    ins Prepared-Verzeichnis auf dem NAS.  Setzt den Status auf 'vorbereitet'.
+    werden die Ergebnisse abgeholt (siehe _finalize_job) — die Hintergrund-
+    Queue macht das sonst auch von selbst.
     """
     if not _cfg.pixinsight_agent_url:
         raise ValueError("PixInsight-Agent-URL nicht konfiguriert")
@@ -834,67 +944,84 @@ async def poll_job_results(
         if agent_status == "running":
             bjob.status = "running"
 
+        if agent_status == "failed":
+            bjob.status = "failed"
+            bjob.error = status_data.get("error") or "Agent-Job fehlgeschlagen"
+            return {"job_id": job_id, "status": "failed", "error": bjob.error}
+
         if agent_status != "completed":
             return {"job_id": job_id, "status": agent_status, "details": status_data}
 
-        # Job abgeschlossen → Ergebnis-ZIP herunterladen
-        try:
-            async with httpx.AsyncClient(timeout=600.0) as client:
-                resp = await client.get(
-                    await _agent_url(f"/results/{bjob.agent_job_id}"),
-                    params={"token": token},
-                )
-                if resp.status_code == 409:
-                    # Race condition: Agent sagt "completed" aber /results sagt "not ready"
-                    return {"job_id": job_id, "status": "running", "message": "Ergebnisse werden noch gepackt …"}
-                resp.raise_for_status()
-                zip_bytes = resp.content
-        except httpx.ConnectError:
-            return {"job_id": job_id, "status": "error", "error": "Agent nicht erreichbar für Download"}
-        except httpx.HTTPStatusError as e:
-            return {"job_id": job_id, "status": "error", "error": f"Download fehlgeschlagen: {e.response.status_code}"}
-
-        # ZIP entpacken
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            extracted = await _extract_zip(zip_bytes, tmp_path)
-
-            if not extracted:
-                return {"job_id": job_id, "status": "error", "error": "Ergebnis-ZIP ist leer"}
-
-            # Frisch gebaute Bias/Dark/Flat-Master aufs NAS legen (Calib/Masters/)
-            # und aus dem Ergebnis entfernen — Folgejobs nutzen sie direkt.
-            harvested = await _harvest_calib_masters(db, user, bjob, tmp_path)
-
-            # Ergebnis-Dateien ins Storage (NAS) schreiben
-            prepared_rel = await prepared_reldir(db, user, obs)
-            written = await _write_prepared_to_storage(user, prepared_rel, tmp_path)
-
-        # Status auf 'vorbereitet' setzen
-        obs.status = "vorbereitet"
-        obs.is_new = False
-        await db.flush()
-
-        bjob.status = "completed"
-
-        # Agent-Job restlos aufraeumen (Input + Output auf dem Mac loeschen)
-        if bjob.agent_job_id:
-            await _cleanup_agent_job(bjob.agent_job_id)
-
-        return {
-            "job_id": job_id,
-            "status": "vorbereitet",
-            "result_files": written,
-            "result_count": len(written),
-            "prepared_dir": prepared_rel,
-            "calib_masters_saved": harvested,
-        }
+        # Job abgeschlossen → Ergebnisse abholen (Lock-geschützt, die
+        # Hintergrund-Queue könnte parallel dasselbe versuchen)
+        return await _finalize_job(bjob)
 
     # Bereits abgeschlossen
     if bjob.status == "completed":
         return {"job_id": job_id, "status": "vorbereitet", "message": "Bereits abgeschlossen"}
 
     return {"job_id": job_id, "status": bjob.status}
+
+
+async def agent_poll_loop():
+    """Hintergrund-Warteschlange: prüft alle offenen PixInsight-Jobs beim
+    Agent und holt fertige Ergebnisse automatisch ab — auch wenn kein
+    Browserfenster offen ist. Dadurch können mehrere Verarbeitungen
+    hintereinander angestoßen werden (der Agent arbeitet sie seriell ab)."""
+    if not _cfg.pixinsight_agent_url:
+        logger.info("PixInsight-Queue aus (PIXINSIGHT_AGENT_URL nicht gesetzt).")
+        return
+    await asyncio.sleep(20)
+    while True:
+        try:
+            open_jobs = [
+                b for b in list(_backend_jobs.values())
+                if b.status in ("sent", "running") and b.agent_job_id
+            ]
+            for bjob in open_jobs:
+                try:
+                    async with httpx.AsyncClient(timeout=15.0) as client:
+                        resp = await client.get(
+                            await _agent_url(f"/status/{bjob.agent_job_id}"),
+                            params={"token": await _agent_token()},
+                        )
+                        resp.raise_for_status()
+                        status_data = resp.json()
+                except Exception:
+                    continue  # Agent gerade nicht erreichbar — nächste Runde
+
+                agent_status = status_data.get("status", "unknown")
+                if agent_status == "running":
+                    bjob.status = "running"
+                elif agent_status == "completed":
+                    logger.info("PixInsight-Queue: Job %s fertig — hole Ergebnisse ab", bjob.id[:8])
+                    try:
+                        await _finalize_job(bjob)
+                    except Exception:
+                        logger.exception("PixInsight-Queue: Finalisierung fehlgeschlagen (Job %s)", bjob.id[:8])
+                elif agent_status == "failed":
+                    bjob.status = "failed"
+                    bjob.error = status_data.get("error") or "Agent-Job fehlgeschlagen"
+                    logger.warning("PixInsight-Queue: Job %s fehlgeschlagen — %s", bjob.id[:8], bjob.error)
+                    try:
+                        async with async_session() as db:
+                            obs = await db.get(Observation, uuid.UUID(bjob.obs_id))
+                            if obs and obs.status == "in_bearbeitung":
+                                obs.status = "raw"
+                                await db.commit()
+                    except Exception:
+                        pass
+        except Exception:
+            logger.exception("PixInsight-Queue-Lauf fehlgeschlagen")
+        await asyncio.sleep(20)
+
+
+def list_backend_jobs() -> list[dict[str, Any]]:
+    """Alle Backend-Jobs (neueste zuerst) — für die Queue-Anzeige im UI."""
+    return [
+        j.to_dict()
+        for j in sorted(_backend_jobs.values(), key=lambda j: j.created_at, reverse=True)
+    ]
 
 
 async def check_job_status(job_id: str) -> dict[str, Any]:

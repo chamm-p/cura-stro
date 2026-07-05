@@ -131,6 +131,13 @@ async def get_job_status(job_id: str, user: User = Depends(get_current_user)):
     return await pixinsight.check_job_status(job_id)
 
 
+@router.get("/api/pixinsight/jobs")
+async def list_jobs(user: User = Depends(get_current_user)):
+    """Alle PixInsight-Jobs dieses Backends (Warteschlange, neueste zuerst)."""
+    jobs = [j for j in pixinsight.list_backend_jobs() if j.get("user_id") == str(user.id)]
+    return {"jobs": jobs}
+
+
 @router.get("/api/pixinsight/health")
 async def agent_health(user: User = Depends(get_current_user)):
     """Prüft, ob der Mac-Agent erreichbar ist und PixInsight findet."""

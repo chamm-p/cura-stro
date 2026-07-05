@@ -32,5 +32,5 @@ class ResultFile(Base):
     file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    source: Mapped[str | None] = mapped_column(String(16), nullable=True)  # upload | watch
+    source: Mapped[str | None] = mapped_column(String(16), nullable=True)  # upload | watch | batch
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

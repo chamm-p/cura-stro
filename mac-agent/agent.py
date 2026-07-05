@@ -799,7 +799,13 @@ async def process(
         )
 
     job_id = str(uuid.uuid4())
-    job_dir = WORK_DIR / job_id
+    # Lesbarer Ordnername: <Objekt>_<Gerät>_<jobid8> statt nackter UUID —
+    # so bleibt auf dem Mac zuordenbar, was wozu gehört.
+    label = "_".join(
+        x for x in ((info.get("object_name") or "").strip(), (info.get("device_name") or "").strip()) if x
+    )
+    label = "".join(c if (c.isalnum() or c in "._-") else "-" for c in label)[:60].strip("._-")
+    job_dir = WORK_DIR / (f"{label}_{job_id[:8]}" if label else job_id)
     input_dir = job_dir / "input"
     output_dir = job_dir / "output"
     input_dir.mkdir(parents=True, exist_ok=True)

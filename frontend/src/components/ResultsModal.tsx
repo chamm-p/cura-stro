@@ -147,7 +147,7 @@ export default function ResultsModal({
               setPiResultCount(poll.data.result_count || 0)
               setPiMsg(
                 poll.data.result_count > 0
-                  ? `${poll.data.result_count} Ergebnis-Datei(en) ins Prepared-Verzeichnis geschrieben. Status → „vorbereitet".`
+                  ? `${poll.data.result_count} Ergebnis-Datei(en) nach Developer/ geschrieben. Status → „vorbereitet".`
                   : 'Batch abgeschlossen, aber keine Ergebnis-Dateien gefunden.'
               )
               onChanged()
@@ -193,7 +193,7 @@ export default function ResultsModal({
       if (poll.data.status === 'vorbereitet') {
         setPiStatus('done')
         setPiResultCount(poll.data.result_count || 0)
-        setPiMsg(`${poll.data.result_count || 0} Ergebnis-Datei(en) ins Prepared-Verzeichnis geschrieben.`)
+        setPiMsg(`${poll.data.result_count || 0} Ergebnis-Datei(en) nach Developer/ geschrieben.`)
         onChanged()
       } else if (poll.data.status === 'failed') {
         setPiStatus('error')
@@ -518,14 +518,22 @@ export default function ResultsModal({
             {status === 'in_bearbeitung' && piStatus === 'idle' && (
               <p className="mt-2 text-xs text-slate-400">
                 <Clock className="mr-1 inline h-3 w-3" />
-                Batch läuft auf dem Mac. Klicke „Jetzt abholen", sobald PixInsight fertig ist.
+                Batch läuft auf dem Mac. Die Ergebnisse werden automatisch abgeholt —
+                du kannst dieses Fenster schließen und weitere Verarbeitungen starten.
+              </p>
+            )}
+            {(piStatus === 'running' || piStatus === 'starting') && (
+              <p className="mt-2 text-xs text-slate-500">
+                Du kannst dieses Fenster schließen — die Verarbeitung läuft im Hintergrund
+                weiter, Ergebnisse werden automatisch abgeholt (siehe Queue in der Verwaltung).
               </p>
             )}
             {status === 'vorbereitet' && (
               <p className="mt-2 text-xs text-cyan-200/80">
                 <FileCheck2 className="mr-1 inline h-3 w-3" />
-                WBPP abgeschlossen — Master-Files liegen im <span className="font-mono">Prepared/</span>-Ordner.
-                Entwickle das Bild manuell in PixInsight und lade das Ergebnis hoch oder lege es in den <span className="font-mono">Developer/</span>-Ordner.
+                Batch abgeschlossen — die Filter-Master liegen im <span className="font-mono">Developer/&lt;Objekt&gt;/&lt;Gerät&gt;/</span>-Ordner
+                und sind unten als Ergebnis gelistet. Entwickle das Bild manuell in PixInsight
+                und lege das fertige Bild ebenfalls dort ab (oder lade es hier hoch) → Status „entwickelt".
               </p>
             )}
           </div>
@@ -563,7 +571,9 @@ export default function ResultsModal({
                       {it.width && it.height ? <span>{it.width}×{it.height}</span> : null}
                       <span>{fmtSize(it.file_size)}</span>
                       <span className="flex items-center gap-1 rounded-full bg-white/10 px-1.5">
-                        {it.source === 'watch' ? <><Radio className="h-3 w-3" /> Watch</> : <><CheckCircle2 className="h-3 w-3" /> Upload</>}
+                        {it.source === 'watch' ? <><Radio className="h-3 w-3" /> Watch</>
+                          : it.source === 'batch' ? <><Cpu className="h-3 w-3" /> Batch</>
+                          : <><CheckCircle2 className="h-3 w-3" /> Upload</>}
                       </span>
                     </div>
                   </div>

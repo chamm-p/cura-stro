@@ -301,23 +301,26 @@ var biasSubs = (calib.biasSubs && calib.biasSubs.length) ? calib.biasSubs : bias
 var darkSubs = (calib.darkSubs && calib.darkSubs.length) ? calib.darkSubs : darks;
 var flatSubs = (calib.flatSubs && calib.flatSubs.length) ? calib.flatSubs : flats;
 
+// Neue Master landen im Output-ROOT (nicht in calibrated/): das Backend
+// zweigt sie dort ab (→ NAS Calib/Masters/), und calibrated/ kann am Ende
+// komplett gelöscht werden, ohne die Master zu verlieren.
 if (calib.masterBias) {
     masterBias = calib.masterBias;
     flog("Bias-Master aus Cache: " + masterBias);
 } else {
-    masterBias = buildMaster(biasSubs, "Bias", calDir + "/master_bias.xisf", false);
+    masterBias = buildMaster(biasSubs, "Bias", outputDir + "/master_bias.xisf", false);
 }
 if (calib.masterDark) {
     masterDark = calib.masterDark;
     flog("Dark-Master aus Cache: " + masterDark);
 } else {
-    masterDark = buildMaster(darkSubs, "Dark", calDir + "/master_dark.xisf", false);
+    masterDark = buildMaster(darkSubs, "Dark", outputDir + "/master_dark.xisf", false);
 }
 if (calib.masterFlat) {
     masterFlat = calib.masterFlat;
     flog("Flat-Master aus Cache: " + masterFlat);
 } else {
-    masterFlat = buildMaster(flatSubs, "Flat", calDir + "/master_flat.xisf", true);
+    masterFlat = buildMaster(flatSubs, "Flat", outputDir + "/master_flat.xisf", true);
 }
 flush();
 
@@ -690,6 +693,30 @@ if (masters.length === 0) {
     flush();
     throw new Error("No filter group had enough frames to integrate");
 }
+
+// ─── Zwischenergebnisse aufräumen ───
+// Kalibrierte/ausgerichtete Einzelframes sind gross (Float32) und jederzeit
+// reproduzierbar — sie werden NICHT mit zurückübertragen. Nur die Master
+// (je Filter + Bias/Dark/Flat) bleiben im Output.
+function removeTree(dir) {
+    if (!File.directoryExists(dir)) return;
+    try {
+        var entries = searchDirectory(dir + "/*");
+        if (entries) {
+            for (var i = 0; i < entries.length; i++) {
+                if (File.directoryExists(entries[i])) {
+                    removeTree(entries[i]);
+                } else {
+                    try { File.remove(entries[i]); } catch (e) { /* ignore */ }
+                }
+            }
+        }
+    } catch (e) { /* ignore */ }
+    try { File.removeDirectory(dir); } catch (e) { /* ignore */ }
+}
+flog("Räume Zwischenergebnisse auf (calibrated/, aligned/) …");
+removeTree(calDir);
+removeTree(alignedDir);
 
 flog("\n=== Batch abgeschlossen ===");
 flog("Output-Verzeichnis: " + outputDir);

@@ -1,5 +1,5 @@
-import { useEffect, useState, useCallback, useMemo } from 'react'
-import { ListChecks, Trash2, Plus, Loader2, Image as ImageIcon, ChevronUp, ChevronDown, StickyNote, X, Layers, Radio, AlertTriangle } from 'lucide-react'
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
+import { ListChecks, Trash2, Plus, Loader2, Image as ImageIcon, ChevronUp, ChevronDown, StickyNote, X, Layers, Radio, AlertTriangle, Cpu } from 'lucide-react'
 import api from '../services/api'
 import Layout from '../components/Layout'
 import SubsModal from '../components/SubsModal'
@@ -34,6 +34,69 @@ function fmtInteg(s: number) {
   if (!s) return ''
   const h = Math.floor(s / 3600); const m = Math.round((s % 3600) / 60)
   return h > 0 ? `${h}h${m > 0 ? ` ${m}m` : ''}` : `${m}m`
+}
+
+// ─── PixInsight-Warteschlange ───
+// Zeigt laufende/wartende Batch-Jobs. Das Backend holt fertige Ergebnisse
+// selbstständig ab (Hintergrund-Queue) — hier nur Anzeige + Tabellen-Refresh,
+// sobald ein Job fertig wird.
+interface PiJob {
+  id: string; status: string; mode: string; error: string | null
+  frame_info: { object_name?: string; device_name?: string } | null
+  created_at: string
+}
+const PI_ACTIVE = ['starting', 'sent', 'running']
+const PI_LABEL: Record<string, string> = { starting: 'überträgt', sent: 'wartet', running: 'läuft' }
+
+function PixiQueue({ onDone }: { onDone: () => void }) {
+  const [jobs, setJobs] = useState<PiJob[]>([])
+  const prevActive = useRef(0)
+  useEffect(() => {
+    const tick = async () => {
+      try {
+        const r = await api.get('/api/pixinsight/jobs')
+        const js: PiJob[] = r.data.jobs || []
+        setJobs(js)
+        const active = js.filter((j) => PI_ACTIVE.includes(j.status)).length
+        if (prevActive.current > 0 && active < prevActive.current) onDone()
+        prevActive.current = active
+      } catch { /* Backend ohne Agent-Konfig o. ä. — still bleiben */ }
+    }
+    tick()
+    const timer = setInterval(tick, 10000)
+    return () => clearInterval(timer)
+  }, [onDone])
+
+  const active = jobs.filter((j) => PI_ACTIVE.includes(j.status))
+  const failed = jobs.filter((j) => j.status === 'failed').slice(0, 2)
+  if (active.length === 0 && failed.length === 0) return null
+
+  const jobLabel = (j: PiJob) => {
+    const obj = j.frame_info?.object_name || '?'
+    const dev = j.frame_info?.device_name
+    return dev ? `${obj}/${dev}` : obj
+  }
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-indigo-400/20 bg-indigo-500/5 px-3 py-2 text-xs">
+      <span className="flex items-center gap-1.5 font-medium text-indigo-200">
+        <Cpu className="h-3.5 w-3.5" /> PixInsight-Queue
+      </span>
+      {active.map((j) => (
+        <span key={j.id} className="flex items-center gap-1.5 rounded-full bg-blue-500/20 px-2.5 py-1 text-blue-200">
+          {j.status === 'running' && <Loader2 className="h-3 w-3 animate-spin" />}
+          {jobLabel(j)} · {PI_LABEL[j.status] || j.status}
+        </span>
+      ))}
+      {failed.map((j) => (
+        <span key={j.id} title={j.error || ''} className="flex items-center gap-1.5 rounded-full bg-red-500/20 px-2.5 py-1 text-red-200">
+          <AlertTriangle className="h-3 w-3" /> {jobLabel(j)} · fehlgeschlagen
+        </span>
+      ))}
+      {active.length > 0 && (
+        <span className="text-slate-500">Ergebnisse werden automatisch abgeholt.</span>
+      )}
+    </div>
+  )
 }
 
 export default function Manage() {
@@ -106,6 +169,8 @@ export default function Manage() {
           <span key={c.v} className={`rounded-full px-2.5 py-1 ${c.cls}`}>{c.label}: {c.n}</span>
         ))}
       </div>
+
+      <PixiQueue onDone={load} />
 
       <div className="mt-5 flex gap-2">
         <input className={`${input} flex-1`} placeholder="Eigenes Ziel planen, z. B. Mosaik Cygnus …" value={newLabel}
