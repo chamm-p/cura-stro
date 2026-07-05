@@ -19,6 +19,7 @@ interface Group {
 }
 interface ScanGroup {
   object: string; device: string; files: number; new: number; registered: number
+  repaired?: number
   entry_exists: boolean; entry_count: number
   matched_ident: string | null; matched_name: string | null; matched_telescope: string | null
   warnings: string[]
@@ -291,6 +292,11 @@ export default function FileImportModal({ onClose, onImported }: { onClose: () =
                 <div key={`${g.object}|${g.device}`} className="flex flex-wrap items-center gap-2 rounded-lg border border-white/10 bg-black/20 px-2.5 py-1.5 text-xs">
                   <span className="font-medium text-slate-200">{g.object}/{g.device}</span>
                   <span className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] text-slate-300">{g.files} Subs</span>
+                  {(g.repaired ?? 0) > 0 && (
+                    <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[11px] text-emerald-300" title="Fehlende Metadaten (Filter/Belichtung/Datum) aus Dateinamen ergänzt">
+                      ✓ {g.repaired} Metadaten ergänzt
+                    </span>
+                  )}
                   {g.registered > 0 ? (
                     <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[11px] text-emerald-300">✓ {g.registered} registriert</span>
                   ) : g.new > 0 ? (

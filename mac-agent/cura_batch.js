@@ -154,20 +154,34 @@ function classifyFrame(filepath) {
 try {
 
 function filterOf(filepath) {
-    // Filter aus dem ASIAir-Dateinamen extrahieren:
-    //   Light_NGC 1499_300.0s_Bin1_OIII_20241225-210058_0010.fit
-    // → Token nach "BinN". Funktioniert auch für _c/_r-Postfixe, da diese
-    // nur hinten angehängt werden. Fallback: "NoFilter" (z. B. Farbkamera).
+    // Filter aus dem Dateinamen extrahieren. Zwei Schemata:
+    //   A (ASIAir):  Light_NGC 1499_300.0s_Bin1_OIII_20241225-210058_0010.fit
+    //                → Token NACH "BinN"
+    //   B (E127):    IC5070_LIGHT_H_300s_BIN1_-8C_006_20240829_015258_….FIT
+    //                → Token NACH dem Typ-Token (LIGHT/DARK/…), wenn dieser
+    //                  nicht am Anfang steht
+    // Funktioniert auch für _c/_r-Postfixe (werden hinten angehängt).
+    // Fallback: "NoFilter" (z. B. Farbkamera).
     var name = filepath;
     var slash = name.lastIndexOf('/');
     if (slash >= 0) name = name.substring(slash + 1);
     var dot = name.lastIndexOf('.');
     if (dot >= 0) name = name.substring(0, dot);
     var parts = name.split('_');
+    // Muster A: Token nach BinN (kein Datum, keine Temperatur wie '-8C')
     for (var i = 0; i < parts.length - 1; i++) {
         if (/^bin\d+$/i.test(parts[i])) {
             var f = parts[i + 1].replace(/[^A-Za-z0-9+-]/g, "");
-            if (f.length > 0 && !/^\d{8}/.test(f)) return f;
+            if (f.length > 0 && !/^\d{8}/.test(f) && !/^-?\d+C$/i.test(f)) return f;
+        }
+    }
+    // Muster B: Typ-Token mitten im Namen → nächstes Token ist der Filter
+    // (nicht bei Index 0 — dort wäre das Folge-Token der Objektname).
+    for (var j = 1; j < parts.length - 1; j++) {
+        if (/^(light|dark|flat|bias|darkflat)$/i.test(parts[j])) {
+            var f2 = parts[j + 1].replace(/[^A-Za-z0-9+-]/g, "");
+            if (f2.length > 0 && !/^\d/.test(f2) && !/^-?\d+C$/i.test(f2) &&
+                !/^bin\d+$/i.test(f2) && !/^\d+(\.\d+)?s$/i.test(f2)) return f2;
         }
     }
     return "NoFilter";

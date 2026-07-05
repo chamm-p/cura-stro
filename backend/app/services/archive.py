@@ -236,6 +236,51 @@ async def register_files(
     return {"added": added, "skipped": len(names) - added}
 
 
+async def reparse_metadata(db: AsyncSession, obs: Observation) -> int:
+    """Parst die Dateinamen bestehender SubFrames erneut (der Parser lernt
+    gelegentlich neue Schemata) und ergänzt FEHLENDE Metadaten — Filter,
+    Belichtung, Binning, Aufnahmezeit. Ein unbekannter frame_type (z. B.
+    'Pelican' aus alten Fehlparses) wird korrigiert. Nichts Vorhandenes
+    wird überschrieben. Liefert die Anzahl aktualisierter Subs."""
+    known = (
+        asi.LIGHT_TYPES
+        | {t.replace(" ", "") for t in asi.CALIBRATION_TYPES}
+        | asi.OTHER_TYPES
+    )
+    rows = list(await db.scalars(select(SubFrame).where(SubFrame.observation_id == obs.id)))
+    fixed = 0
+    for s in rows:
+        parsed = asi.parse_frame_filename(s.original_filename)
+        if not parsed:
+            continue
+        changed = False
+        if not s.filter_name and parsed.filter_name:
+            s.filter_name = parsed.filter_name
+            changed = True
+        if not s.exposure_s and parsed.exposure_s:
+            s.exposure_s = parsed.exposure_s
+            changed = True
+        if not s.binning and parsed.binning:
+            s.binning = parsed.binning
+            changed = True
+        if not s.captured_at and parsed.captured_at:
+            s.captured_at = parsed.captured_at
+            changed = True
+        if (s.frame_type or "").lower().replace(" ", "") not in known and parsed.frame_type:
+            s.frame_type = parsed.frame_type
+            changed = True
+        if changed:
+            fixed += 1
+    if fixed:
+        oldest = await db.scalar(
+            select(func.min(SubFrame.captured_at)).where(SubFrame.observation_id == obs.id)
+        )
+        if oldest:
+            obs.planned_date = oldest.date()
+        await db.flush()
+    return fixed
+
+
 async def summary(db: AsyncSession, obs: Observation) -> dict:
     rows = await db.scalars(select(SubFrame).where(SubFrame.observation_id == obs.id))
     subs = list(rows)

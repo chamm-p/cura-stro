@@ -263,6 +263,7 @@ async def scan_archive(
             new_names = [n for n in names if PurePosixPath(n.replace("\\", "/")).name not in existing]
 
             registered = 0
+            repaired = 0
             if not body.dry_run and new_names:
                 key = f"{obj}|{dev}"
                 if key in force_new or not obss:
@@ -270,15 +271,22 @@ async def scan_archive(
                         db, user, match, match.ident if match else obj,
                         scope.id if scope else None,
                     )
+                    obss = [target] + obss
                 else:
                     target = obss[0]  # neuester Eintrag wird ergänzt
                 r = await archive.register_files(db, user, target, rel_dir, new_names, source="nas")
                 registered = r["added"]
                 total_new += registered
+            if not body.dry_run:
+                # Metadaten-Nachparse: der Parser lernt neue Namensschemata —
+                # fehlende Filter/Belichtung/Datum bestehender Subs ergänzen.
+                for o in obss:
+                    repaired += await archive.reparse_metadata(db, o)
 
             groups.append({
                 "object": obj, "device": dev, "files": len(names),
                 "new": len(new_names), "registered": registered,
+                "repaired": repaired,
                 "entry_exists": len(obss) > 0,
                 "entry_count": len(obss),
                 "matched_ident": match.ident if match else None,

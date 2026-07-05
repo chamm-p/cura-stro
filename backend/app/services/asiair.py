@@ -74,6 +74,21 @@ _PATTERN_NOTYPE = re.compile(
     r"(?:\.(?P<ext>[A-Za-z0-9]+))?$"
 )
 
+# Alternatives Schema (z. B. E127-Aufnahmesoftware): Objekt zuerst, Typ danach,
+# Filter VOR der Belichtung, BIN groß, Datum/Zeit mit Unterstrich:
+#   IC5070_LIGHT_H_300s_BIN1_-8C_006_20240829_015258_066_GA_0_OF_0_PA101.08_E.FIT
+_PATTERN_ALT = re.compile(
+    r"^(?P<obj>.+?)_"
+    r"(?P<type>LIGHT|DARK FLAT|DARKFLAT|DARK|FLAT|BIAS)_"
+    r"(?:(?P<filter>[A-Za-z][A-Za-z0-9]*)_)?"
+    r"(?P<exp>\d+(?:\.\d+)?)s?_"
+    r"BIN(?P<bin>\d+)"
+    r"(?P<rest>_.*)?$",
+    re.IGNORECASE,
+)
+# Datum/Zeit (+ optionale Sequenz) irgendwo im Rest: _YYYYMMDD_HHMMSS[_SEQ]
+_ALT_DATETIME = re.compile(r"_(?P<date>\d{8})_(?P<time>\d{6})(?:_(?P<seq>\d+))?")
+
 
 @dataclass
 class ParsedFrame:
@@ -118,6 +133,32 @@ def parse_frame_filename(filename: str) -> ParsedFrame | None:
             # Unbekanntes Präfix → Teil des Objektnamens, Frame ist ein Light.
             obj = f"{ftype}_{obj}"
             ftype = "Light"
+    elif (m_alt := _PATTERN_ALT.match(name)):
+        # Alternatives Schema: Objekt_TYP_Filter_Belichtung_BINn_…
+        g = m_alt.groupdict()
+        ftype = g["type"].strip().capitalize()
+        obj = g["obj"].strip()
+        dt = _ALT_DATETIME.search(g["rest"] or "")
+        ext = PurePosixPath(name).suffix.lstrip(".").lower()
+        flt = g["filter"]
+        try:
+            captured = datetime.strptime(dt.group("date") + dt.group("time"), "%Y%m%d%H%M%S") if dt else None
+        except ValueError:
+            captured = None
+        if captured is None:
+            return None
+        return ParsedFrame(
+            frame_type=ftype,
+            object_name=obj,
+            exposure_s=float(g["exp"]),
+            binning=int(g["bin"]),
+            filter_letter=flt,
+            filter_name=canonical_filter(flt) if flt else None,
+            captured_at=captured,
+            sequence=int(dt.group("seq")) if dt and dt.group("seq") else 0,
+            ext=ext,
+            filename=name,
+        )
     else:
         m = _PATTERN_NOTYPE.match(name)
         if not m:
