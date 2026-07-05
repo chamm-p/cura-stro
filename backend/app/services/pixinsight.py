@@ -1184,11 +1184,21 @@ async def precheck(
     subs = list(subs)
 
     frame_counts: dict[str, int] = {}
+    raw_types: dict[str, int] = {}
     missing_archive: list[str] = []
     total_size: int = 0
 
+    # Tolerante Klassifikation: nur echte Calib-/Stack-Typen sind KEINE
+    # Lights. Alles Unbekannte (z. B. frame_type='Pelican' aus abweichenden
+    # Dateinamen älterer Importe) zählt als Light — konsistent zum
+    # Batch-Script, das genauso klassifiziert.
+    _CALIB = {"dark", "flat", "bias", "darkflat", "dark flat"}
+    _OTHER = {"stacked", "preview", "snapshot", "master"}
     for s in subs:
-        ft = (s.frame_type or "Light").lower()
+        raw = (s.frame_type or "Light").lower()
+        raw_types[raw] = raw_types.get(raw, 0) + 1
+        key = raw.replace(" ", "")
+        ft = key if key in {c.replace(" ", "") for c in _CALIB} else ("other" if key in _OTHER else "light")
         frame_counts[ft] = frame_counts.get(ft, 0) + 1
         if not s.archive_path:
             missing_archive.append(s.original_filename)
@@ -1209,10 +1219,11 @@ async def precheck(
         })
     else:
         if light_count == 0:
+            found = ", ".join(f"{k}: {v}×" for k, v in sorted(raw_types.items())) or "—"
             errors.append({
                 "level": "error",
                 "code": "no_lights",
-                "message": "Keine Light-Frames gefunden — ohne Lights ist kein Stacking möglich.",
+                "message": f"Keine Light-Frames gefunden — ohne Lights ist kein Stacking möglich. (Gefundene Frame-Typen: {found})",
             })
         if missing_archive:
             warnings.append({

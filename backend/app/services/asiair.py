@@ -41,12 +41,31 @@ FILTER_CANON: dict[str, str] = {
 # Kalibrierframes erkennen wir, behandeln sie aber (vorerst) separat/optional.
 LIGHT_TYPES = {"light"}
 CALIBRATION_TYPES = {"dark", "flat", "bias", "darkflat", "dark flat"}
+# Weitere bekannte Nicht-Light-Präfixe (ASIAir-Vorschauen/Stacks).
+OTHER_TYPES = {"stacked", "preview", "snapshot", "master"}
+_KNOWN_TYPES = (
+    LIGHT_TYPES
+    | {t.replace(" ", "") for t in CALIBRATION_TYPES}
+    | OTHER_TYPES
+)
 
 # Dateiname-Muster. Filtergruppe optional (OSC ohne Filter):
 #   Light_<obj>_<exp>s_Bin<n>[_<filter>]_<YYYYMMDD>-<HHMMSS>_<seq>[.<ext>]
 _PATTERN = re.compile(
     r"^(?P<type>[A-Za-z][A-Za-z ]*?)_"
     r"(?P<obj>.+?)_"
+    r"(?P<exp>\d+(?:\.\d+)?)s_"
+    r"Bin(?P<bin>\d+)_"
+    r"(?:(?P<filter>[^_]+)_)?"
+    r"(?P<date>\d{8})-(?P<time>\d{6})_"
+    r"(?P<seq>\d+)"
+    r"(?:\.(?P<ext>[A-Za-z0-9]+))?$"
+)
+
+# Fallback ohne Typ-Präfix: <obj>_<exp>s_Bin<n>[_<filter>]_<datum>-<zeit>_<seq>
+# (manche Quellen/ältere Bestände lassen das 'Light_' weg) → zählt als Light.
+_PATTERN_NOTYPE = re.compile(
+    r"^(?P<obj>.+?)_"
     r"(?P<exp>\d+(?:\.\d+)?)s_"
     r"Bin(?P<bin>\d+)_"
     r"(?:(?P<filter>[^_]+)_)?"
@@ -81,12 +100,36 @@ class ParsedFrame:
 
 
 def parse_frame_filename(filename: str) -> ParsedFrame | None:
-    """Parst einen ASIAir-Dateinamen. ``None``, wenn er nicht passt."""
+    """Parst einen ASIAir-Dateinamen. ``None``, wenn er nicht passt.
+
+    Robust gegen abweichende Namen: beginnt der Name mit einem Wort, das
+    KEIN bekannter Frame-Typ ist (z. B. ``Pelican_IC5070_300.0s_…`` —
+    die ASIAir setzt den eingetippten Zielnamen voran), gehört das Präfix
+    zum Objektnamen und die Datei zählt als Light. Fehlt der Typ ganz
+    (``IC5070_300.0s_…``), greift das Fallback-Muster — ebenfalls Light."""
     name = PurePosixPath(filename.strip()).name
     m = _PATTERN.match(name)
-    if not m:
-        return None
-    g = m.groupdict()
+    ftype = None
+    if m:
+        g = m.groupdict()
+        ftype = g["type"].strip()
+        obj = g["obj"].strip()
+        if ftype.lower().replace(" ", "") not in _KNOWN_TYPES:
+            # Unbekanntes Präfix → Teil des Objektnamens, Frame ist ein Light.
+            obj = f"{ftype}_{obj}"
+            ftype = "Light"
+    else:
+        m = _PATTERN_NOTYPE.match(name)
+        if not m:
+            return None
+        g = m.groupdict()
+        obj = g["obj"].strip()
+        if obj.lower().replace(" ", "") in _KNOWN_TYPES:
+            # z. B. 'Dark_300.0s_Bin1_…' — Typ ohne Objektname (Calib-Frames)
+            ftype = obj
+            obj = ""
+        else:
+            ftype = "Light"
     try:
         captured = datetime.strptime(g["date"] + g["time"], "%Y%m%d%H%M%S")
     except ValueError:
@@ -94,8 +137,8 @@ def parse_frame_filename(filename: str) -> ParsedFrame | None:
     ext = (g["ext"] or "").lower()
     flt = g["filter"]
     return ParsedFrame(
-        frame_type=g["type"].strip(),
-        object_name=g["obj"].strip(),
+        frame_type=ftype,
+        object_name=obj,
         exposure_s=float(g["exp"]),
         binning=int(g["bin"]),
         filter_letter=flt,

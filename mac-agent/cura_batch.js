@@ -75,20 +75,24 @@ flush();
 // ─── Hilfsfunktionen ───
 
 function findImageFiles(dir) {
-    // searchDirectory ist eine PJSR-Globalfunktion (glob-like)
+    // Alle Einträge listen und selbst nach Endung filtern — case-UNabhängig.
+    // (Glob-Muster wie '*.fit' können auf SMB-Volumes case-sensitiv sein
+    // und würden '.FIT' verpassen.)
     var files = [];
-    var exts = ["*.fit", "*.fits", "*.fts", "*.xisf", "*.tif", "*.tiff"];
-    for (var e = 0; e < exts.length; e++) {
-        try {
-            var found = searchDirectory(dir + "/" + exts[e]);
-            if (found) {
-                for (var i = 0; i < found.length; i++) {
-                    files.push(found[i]);
+    var exts = { ".fit": 1, ".fits": 1, ".fts": 1, ".xisf": 1, ".tif": 1, ".tiff": 1 };
+    try {
+        var entries = searchDirectory(dir + "/*");
+        if (entries) {
+            for (var i = 0; i < entries.length; i++) {
+                if (File.directoryExists(entries[i])) continue;
+                var dot = entries[i].lastIndexOf(".");
+                if (dot >= 0 && exts[entries[i].substring(dot).toLowerCase()]) {
+                    files.push(entries[i]);
                 }
             }
-        } catch (ex) {
-            // searchDirectory wirft bei leerem Verzeichnis — ignorieren
         }
+    } catch (ex) {
+        // searchDirectory wirft bei leerem Verzeichnis — ignorieren
     }
     return files;
 }
