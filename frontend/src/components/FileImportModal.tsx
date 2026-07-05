@@ -53,6 +53,7 @@ export default function FileImportModal({ onClose, onImported }: { onClose: () =
   const [importing, setImporting] = useState(false)
   const [progress, setProgress] = useState<{ done: number; total: number; current: string } | null>(null)
   const [result, setResult] = useState<{ filed: number; duplicates: number; errors: number } | null>(null)
+  const [errorDetails, setErrorDetails] = useState<string[]>([])
   const [err, setErr] = useState('')
   const dirRef = useRef<HTMLInputElement>(null)
   const abortRef = useRef(false)
@@ -131,8 +132,16 @@ export default function FileImportModal({ onClose, onImported }: { onClose: () =
     const invalid = selected.find((g) => !g.object.trim())
     if (invalid) { setErr('Bitte für alle gewählten Gruppen einen Objektnamen eintragen.'); return }
     const total = selected.reduce((n, g) => n + g.files.length, 0)
-    setImporting(true); setErr(''); setResult(null); abortRef.current = false
+    setImporting(true); setErr(''); setResult(null); setErrorDetails([]); abortRef.current = false
     let done = 0, filed = 0, duplicates = 0, errors = 0
+    // Fehlermeldungen sammeln (dedupliziert mit Zähler) — sonst sieht man
+    // nur "N Fehler" und rät im Dunkeln.
+    const errMsgs = new Map<string, number>()
+    const noteError = (msg: unknown) => {
+      errors++
+      const m = String(msg || 'unbekannter Fehler').slice(0, 300)
+      errMsgs.set(m, (errMsgs.get(m) || 0) + 1)
+    }
     try {
       for (const g of selected) {
         for (const p of g.files) {
@@ -146,14 +155,20 @@ export default function FileImportModal({ onClose, onImported }: { onClose: () =
             const r = await api.post('/api/import/file', fd, { timeout: 300000 })
             if (r.data.status === 'filed') filed++
             else if (r.data.status === 'duplicate') duplicates++
-            else errors++
-          } catch { errors++ }
+            else noteError(r.data.error || `Status „${r.data.status}“`)
+          } catch (e: any) {
+            noteError(e.response?.data?.detail || (e.response?.status ? `HTTP ${e.response.status}` : e.message))
+          }
           done++
         }
         if (abortRef.current) break
       }
       setProgress({ done, total, current: '' })
       setResult({ filed, duplicates, errors })
+      setErrorDetails(
+        [...errMsgs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3)
+          .map(([m, n]) => (n > 1 ? `${n}× ${m}` : m))
+      )
       if (filed > 0) onImported()
     } finally { setImporting(false) }
   }
@@ -256,9 +271,21 @@ export default function FileImportModal({ onClose, onImported }: { onClose: () =
         )}
 
         {result && (
-          <div className="mt-3 flex items-center gap-2 rounded-lg border border-emerald-400/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200">
-            <CheckCircle2 className="h-4 w-4 shrink-0" />
+          <div className={`mt-3 flex items-center gap-2 rounded-lg border px-3 py-2 text-sm ${
+            result.errors > 0 && result.filed === 0
+              ? 'border-red-400/30 bg-red-500/10 text-red-200'
+              : 'border-emerald-400/30 bg-emerald-500/10 text-emerald-200'
+          }`}>
+            {result.errors > 0 && result.filed === 0 ? <AlertTriangle className="h-4 w-4 shrink-0" /> : <CheckCircle2 className="h-4 w-4 shrink-0" />}
             {result.filed} importiert{result.duplicates > 0 ? `, ${result.duplicates} Duplikat(e) übersprungen` : ''}{result.errors > 0 ? `, ${result.errors} Fehler` : ''}.
+          </div>
+        )}
+        {errorDetails.length > 0 && (
+          <div className="mt-2 space-y-1 rounded-lg border border-red-400/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+            <div className="font-medium">Fehlerdetails:</div>
+            {errorDetails.map((m, i) => (
+              <div key={i} className="break-words font-mono">{m}</div>
+            ))}
           </div>
         )}
         {err && (
