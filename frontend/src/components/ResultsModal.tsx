@@ -65,6 +65,7 @@ export default function ResultsModal({
   const [piJobId, setPiJobId] = useState<string | null>(null)
   const [piMsg, setPiMsg] = useState('')
   const [piResultCount, setPiResultCount] = useState<number | null>(null)
+  const [piErrDetail, setPiErrDetail] = useState('')
   const [processMode, setProcessMode] = useState<ProcessMode>('shell_sim')
   const [precheck, setPrecheck] = useState<PrecheckResult | null>(null)
   const [precheckLoading, setPrecheckLoading] = useState(false)
@@ -174,6 +175,7 @@ export default function ResultsModal({
           if (pollRef.current) clearInterval(pollRef.current)
           setPiStatus('error')
           setErr(r.data.error || 'PixInsight-Batch fehlgeschlagen.')
+          setPiErrDetail(r.data.error_detail || '')
         } else if (st === 'starting') {
           setPiMsg('RAW-Dateien werden gesammelt und an den Mac-Agent gesendet …')
         } else {
@@ -210,6 +212,7 @@ export default function ResultsModal({
       } else if (poll.data.status === 'failed') {
         setPiStatus('error')
         setErr(poll.data.error || 'Batch fehlgeschlagen.')
+        setPiErrDetail(poll.data.error_detail || '')
       } else {
         setPiStatus('running')
         setPiMsg(`Job-Status: ${poll.data.status || 'unbekannt'}`)
@@ -529,6 +532,9 @@ export default function ResultsModal({
             {piStatus === 'error' && err && (
               <div className="mt-2 rounded-lg border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
                 <AlertTriangle className="mr-1.5 inline h-4 w-4 shrink-0 align-text-bottom" /> {err}
+                {piErrDetail && (
+                  <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded-lg bg-black/40 p-2.5 font-mono text-[11px] leading-relaxed text-slate-300">{piErrDetail}</pre>
+                )}
               </div>
             )}
 

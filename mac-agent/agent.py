@@ -151,6 +151,9 @@ class Job:
     return_code: int | None = None
     log_file: str | None = None
     error: str | None = None
+    # Letzte Zeilen des cura_batch-Logs bei Fehlern — der konkrete Grund
+    # (z. B. StarAlignment fehlgeschlagen, Platz voll) fürs UI.
+    error_detail: str | None = None
     # Aufgelöste Cache-Pfade für cura_batch.js (CURA_CALIB): masterBias/
     # masterDark/masterFlat (Pfad oder "") + biasSubs/darkSubs/flatSubs.
     calib_paths: dict[str, Any] = field(default_factory=dict)
@@ -475,6 +478,22 @@ def _cache_built_masters(output_dir: Path) -> None:
                 log.warning("  Konnte %s nicht in den Cache übernehmen: %s", name, e)
 
 
+def _batch_log_tail(output_dir: Path, max_lines: int = 25) -> str | None:
+    """Fehlergrund fürs UI: cura_batch_error.log komplett, sonst die letzten
+    Zeilen von cura_batch.log (dort steht, wie weit das Script kam)."""
+    try:
+        err_log = output_dir / "cura_batch_error.log"
+        if err_log.exists():
+            return err_log.read_text(errors="replace").strip()[-2000:]
+        batch_log = output_dir / "cura_batch.log"
+        if batch_log.exists():
+            lines = batch_log.read_text(errors="replace").strip().split("\n")
+            return "\n".join(lines[-max_lines:])[-2000:]
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def _print_batch_log(output_dir: Path) -> None:
     """Gibt das von cura_batch.js geschriebene Datei-Log auf der Agent-Konsole
     aus. Das ist die EINZIGE Quelle für Script-Ausgaben/Fehler — PixInsight
@@ -630,12 +649,14 @@ async def _run_pixinsight(job: Job) -> None:
                     # manuell entwickelte Einzelbild entsteht später und wird
                     # hier NICHT erwartet.
                     job.error = ("PixInsight hat keine Master-Dateien erzeugt "
-                                 "(Stacking unvollständig) — siehe cura_batch-Log")
+                                 "(Stacking unvollständig) — siehe Details")
+                    job.error_detail = _batch_log_tail(Path(job.work_output))
                     log.error("Job %s — FEHLER: keine Master im Output (exit 0). "
                               "Ursache steht im cura_batch.js-Log oben.", job.id[:8])
             else:
                 job.status = "failed"
-                job.error = f"PixInsight exit code {rc} — siehe Log: {log_file}"
+                job.error = f"PixInsight exit code {rc} — siehe Details"
+                job.error_detail = _batch_log_tail(Path(job.work_output))
                 log.error("Job %s — FEHLER: PixInsight exit code %d", job.id[:8], rc)
                 log.error("  Log: %s", log_file)
 

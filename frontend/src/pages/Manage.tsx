@@ -43,6 +43,7 @@ function fmtInteg(s: number) {
 // sobald ein Job fertig wird.
 interface PiJob {
   id: string; status: string; mode: string; error: string | null
+  error_detail: string | null
   frame_info: { object_name?: string; device_name?: string } | null
   created_at: string
 }
@@ -51,6 +52,7 @@ const PI_LABEL: Record<string, string> = { starting: 'überträgt', sent: 'warte
 
 function PixiQueue({ onDone }: { onDone: () => void }) {
   const [jobs, setJobs] = useState<PiJob[]>([])
+  const [detailFor, setDetailFor] = useState<string | null>(null)  // Job-ID
   const prevActive = useRef(0)
   useEffect(() => {
     const tick = async () => {
@@ -68,8 +70,14 @@ function PixiQueue({ onDone }: { onDone: () => void }) {
     return () => clearInterval(timer)
   }, [onDone])
 
+  const removeJob = async (id: string) => {
+    try { await api.delete(`/api/pixinsight/jobs/${id}`) } catch { /* ignore */ }
+    setDetailFor(null)
+    setJobs((js) => js.filter((j) => j.id !== id))
+  }
+
   const active = jobs.filter((j) => PI_ACTIVE.includes(j.status))
-  const failed = jobs.filter((j) => j.status === 'failed').slice(0, 2)
+  const failed = jobs.filter((j) => j.status === 'failed').slice(0, 4)
   if (active.length === 0 && failed.length === 0) return null
 
   const jobLabel = (j: PiJob) => {
@@ -77,24 +85,62 @@ function PixiQueue({ onDone }: { onDone: () => void }) {
     const dev = j.frame_info?.device_name
     return dev ? `${obj}/${dev}` : obj
   }
+  const detail = detailFor ? jobs.find((j) => j.id === detailFor) : null
   return (
-    <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-indigo-400/20 bg-indigo-500/5 px-3 py-2 text-xs">
-      <span className="flex items-center gap-1.5 font-medium text-indigo-200">
-        <Cpu className="h-3.5 w-3.5" /> PixInsight-Queue
-      </span>
-      {active.map((j) => (
-        <span key={j.id} className="flex items-center gap-1.5 rounded-full bg-blue-500/20 px-2.5 py-1 text-blue-200">
-          {j.status === 'running' && <Loader2 className="h-3 w-3 animate-spin" />}
-          {jobLabel(j)} · {PI_LABEL[j.status] || j.status}
+    <div className="mt-3 rounded-xl border border-indigo-400/20 bg-indigo-500/5 px-3 py-2 text-xs">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="flex items-center gap-1.5 font-medium text-indigo-200">
+          <Cpu className="h-3.5 w-3.5" /> PixInsight-Queue
         </span>
-      ))}
-      {failed.map((j) => (
-        <span key={j.id} title={j.error || ''} className="flex items-center gap-1.5 rounded-full bg-red-500/20 px-2.5 py-1 text-red-200">
-          <AlertTriangle className="h-3 w-3" /> {jobLabel(j)} · fehlgeschlagen
-        </span>
-      ))}
-      {active.length > 0 && (
-        <span className="text-slate-500">Ergebnisse werden automatisch abgeholt.</span>
+        {active.map((j) => (
+          <span key={j.id} className="flex items-center gap-1.5 rounded-full bg-blue-500/20 px-2.5 py-1 text-blue-200">
+            {j.status === 'running' && <Loader2 className="h-3 w-3 animate-spin" />}
+            {jobLabel(j)} · {PI_LABEL[j.status] || j.status}
+          </span>
+        ))}
+        {failed.map((j) => (
+          <button
+            key={j.id}
+            onClick={() => setDetailFor(detailFor === j.id ? null : j.id)}
+            title="Klicken für Fehlerdetails"
+            className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-red-200 transition hover:bg-red-500/30 ${
+              detailFor === j.id ? 'bg-red-500/30 ring-1 ring-red-400/50' : 'bg-red-500/20'
+            }`}
+          >
+            <AlertTriangle className="h-3 w-3" /> {jobLabel(j)} · fehlgeschlagen
+          </button>
+        ))}
+        {active.length > 0 && (
+          <span className="text-slate-500">Ergebnisse werden automatisch abgeholt.</span>
+        )}
+      </div>
+
+      {/* Fehlerdetails zum angeklickten Job */}
+      {detail && (
+        <div className="mt-2 rounded-lg border border-red-400/30 bg-red-500/10 p-3">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <div className="font-medium text-red-200">
+                {jobLabel(detail)} · {detail.mode} · {detail.created_at ? new Date(detail.created_at).toLocaleString('de-DE') : ''}
+              </div>
+              <div className="mt-1 text-red-200">{detail.error || 'Kein Fehlertext übermittelt.'}</div>
+            </div>
+            <div className="flex shrink-0 gap-1.5">
+              <button onClick={() => removeJob(detail.id)} className="rounded-lg border border-white/10 px-2.5 py-1 text-slate-300 hover:bg-white/10" title="Job aus der Anzeige entfernen">
+                Entfernen
+              </button>
+              <button onClick={() => setDetailFor(null)} className="rounded-lg p-1 text-slate-400 hover:bg-white/10"><X className="h-4 w-4" /></button>
+            </div>
+          </div>
+          {detail.error_detail && (
+            <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap rounded-lg bg-black/40 p-2.5 font-mono text-[11px] leading-relaxed text-slate-300">{detail.error_detail}</pre>
+          )}
+          {!detail.error_detail && (
+            <div className="mt-1.5 text-[11px] text-slate-500">
+              Kein Log-Auszug verfügbar (Agent-Version zu alt oder Job vor dem Update gestartet) — Details stehen im Agent-Log auf dem Mac.
+            </div>
+          )}
+        </div>
       )}
     </div>
   )

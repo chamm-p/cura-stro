@@ -138,6 +138,14 @@ async def list_jobs(user: User = Depends(get_current_user)):
     return {"jobs": jobs}
 
 
+@router.delete("/api/pixinsight/jobs/{job_id}")
+async def remove_job(job_id: str, user: User = Depends(get_current_user)):
+    """Entfernt einen abgeschlossenen/fehlgeschlagenen Job aus der Queue-Anzeige."""
+    if not pixinsight.remove_backend_job(job_id, str(user.id)):
+        raise HTTPException(404, "Job nicht gefunden oder läuft noch")
+    return {"removed": job_id}
+
+
 @router.get("/api/pixinsight/health")
 async def agent_health(user: User = Depends(get_current_user)):
     """Prüft, ob der Mac-Agent erreichbar ist und PixInsight findet."""

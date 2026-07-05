@@ -113,6 +113,7 @@ class BackendJob:
     agent_job_id: str | None = None
     mode: str = "wbpp"
     error: str | None = None
+    error_detail: str | None = None  # z. B. cura_batch-Log-Auszug vom Agent
     input_files: int = 0
     calibration_dir: str = ""
     flats_dir: str = ""
@@ -954,7 +955,9 @@ async def poll_job_results(
         if agent_status == "failed":
             bjob.status = "failed"
             bjob.error = status_data.get("error") or "Agent-Job fehlgeschlagen"
-            return {"job_id": job_id, "status": "failed", "error": bjob.error}
+            bjob.error_detail = status_data.get("error_detail")
+            return {"job_id": job_id, "status": "failed", "error": bjob.error,
+                    "error_detail": bjob.error_detail}
 
         if agent_status != "completed":
             return {"job_id": job_id, "status": agent_status, "details": status_data}
@@ -1012,6 +1015,7 @@ async def agent_poll_loop():
                 elif agent_status == "failed":
                     bjob.status = "failed"
                     bjob.error = status_data.get("error") or "Agent-Job fehlgeschlagen"
+                    bjob.error_detail = status_data.get("error_detail")
                     logger.warning("PixInsight-Queue: Job %s fehlgeschlagen — %s", bjob.id[:8], bjob.error)
                     try:
                         async with async_session() as db:
@@ -1032,6 +1036,19 @@ def list_backend_jobs() -> list[dict[str, Any]]:
         j.to_dict()
         for j in sorted(_backend_jobs.values(), key=lambda j: j.created_at, reverse=True)
     ]
+
+
+def remove_backend_job(job_id: str, user_id: str) -> bool:
+    """Entfernt einen abgeschlossenen/fehlgeschlagenen Job aus der Queue-
+    Anzeige (laufende bleiben). True = entfernt."""
+    j = _backend_jobs.get(job_id)
+    if not j or j.user_id != user_id:
+        return False
+    if j.status in ("starting", "sent", "running"):
+        return False
+    _backend_jobs.pop(job_id, None)
+    _finalize_locks.pop(job_id, None)
+    return True
 
 
 async def check_job_status(job_id: str) -> dict[str, Any]:
@@ -1086,12 +1103,14 @@ async def check_job_status(job_id: str) -> dict[str, Any]:
         elif agent_status == "failed":
             bjob.status = "failed"
             bjob.error = agent_data.get("error", "Agent-Job fehlgeschlagen")
+            bjob.error_detail = agent_data.get("error_detail")
 
         return {
             "status": agent_status,
             "input_files": bjob.input_files,
             "agent_job_id": bjob.agent_job_id,
             "error": agent_data.get("error"),
+            "error_detail": agent_data.get("error_detail"),
         }
 
     return {"status": bjob.status}
