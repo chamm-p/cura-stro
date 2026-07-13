@@ -119,14 +119,23 @@ class ParsedFrame:
 
 
 def parse_frame_filename(filename: str) -> ParsedFrame | None:
-    """Parst einen ASIAir-Dateinamen. ``None``, wenn er nicht passt.
+    """Parst einen Frame-Dateinamen. ``None``, wenn es keiner ist.
 
-    Robust gegen abweichende Namen: beginnt der Name mit einem Wort, das
-    KEIN bekannter Frame-Typ ist (z. B. ``Pelican_IC5070_300.0s_…`` —
-    die ASIAir setzt den eingetippten Zielnamen voran), gehört das Präfix
-    zum Objektnamen und die Datei zählt als Light. Fehlt der Typ ganz
-    (``IC5070_300.0s_…``), greift das Fallback-Muster — ebenfalls Light."""
+    Zweistufig:
+      1. Präzise Muster für die bekannten Schemata (ASIAir, E127).
+      2. Fällt das durch, ein heuristischer Parser, der die Bausteine an
+         ihrer FORM erkennt (Belichtung ``…s``, Binning ``Bin…``,
+         Zeitstempel, Sequenz = letzte Zahl) statt an fester Position.
+         Dadurch überlebt der Import künftige ASIAir-Namensänderungen
+         (zusätzliche/umsortierte Tokens) OHNE Code-Anpassung."""
     name = PurePosixPath(filename.strip()).name
+    strict = _parse_strict(name)
+    if strict is not None:
+        return strict
+    return _heuristic_parse(name)
+
+
+def _parse_strict(name: str) -> ParsedFrame | None:
     m = _PATTERN.match(name)
     ftype = None
     if m:
@@ -190,6 +199,113 @@ def parse_frame_filename(filename: str) -> ParsedFrame | None:
         filter_name=canonical_filter(flt) if flt else None,
         captured_at=captured,
         sequence=int(g["seq"]),
+        ext=ext,
+        filename=name,
+    )
+
+
+# ─── Heuristischer Fallback-Parser (form- statt positionsbasiert) ───
+_H_EXP = re.compile(r"^(\d+(?:\.\d+)?)s$", re.I)     # 30.0s / 300s
+_H_BIN = re.compile(r"^bin(\d+)$", re.I)             # Bin1 / BIN1
+_H_DT1 = re.compile(r"^(\d{8})-(\d{6})$")            # 20260713-041225 (ASIAir)
+_H_D8 = re.compile(r"^\d{8}$")
+_H_T6 = re.compile(r"^\d{6}$")
+_H_NUM = re.compile(r"^\d+$")
+_H_TEMP = re.compile(r"^-?\d+C$", re.I)              # -10C (Sensortemperatur)
+_H_DEG = re.compile(r"^\d+deg$", re.I)               # 333deg (Rotatorwinkel)
+
+
+def _heuristic_parse(name: str) -> ParsedFrame | None:
+    """Erkennt Frame-Bausteine an ihrer Form statt an fester Position — für
+    unbekannte/künftige Namensschemata."""
+    stem = name
+    ext = ""
+    dot = stem.rfind(".")
+    if dot > 0:
+        ext = stem[dot + 1:].lower()
+        stem = stem[:dot]
+    toks = stem.split("_")
+    if len(toks) < 3:
+        return None
+
+    def _find(rx):
+        for i, t in enumerate(toks):
+            m = rx.match(t)
+            if m:
+                return i, m
+        return None, None
+
+    exp_idx, exp_m = _find(_H_EXP)
+    bin_idx, bin_m = _find(_H_BIN)
+    if exp_idx is None or bin_idx is None:
+        return None  # ohne Belichtung UND Binning kein Frame-Dateiname
+
+    # Zeitstempel: kombiniert (ASIAir) oder getrennt (E127)
+    dt_idx = dt_span = None
+    captured = None
+    for i, t in enumerate(toks):
+        m = _H_DT1.match(t)
+        if m:
+            dt_idx, dt_span = i, 1
+            try:
+                captured = datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
+            except ValueError:
+                captured = None
+            break
+    if dt_idx is None:
+        for i in range(len(toks) - 1):
+            if _H_D8.match(toks[i]) and _H_T6.match(toks[i + 1]):
+                dt_idx, dt_span = i, 2
+                try:
+                    captured = datetime.strptime(toks[i] + toks[i + 1], "%Y%m%d%H%M%S")
+                except ValueError:
+                    captured = None
+                break
+    if dt_idx is None or captured is None:
+        return None
+
+    # Frame-Typ: erstes Token, das ein bekannter Typ ist (sonst Light)
+    type_idx = None
+    ftype = "Light"
+    for i, t in enumerate(toks):
+        if t.lower().replace(" ", "") in _KNOWN_TYPES:
+            type_idx, ftype = i, t.strip().capitalize()
+            break
+
+    # Sequenz: erstes reines Zahl-Token NACH dem Zeitstempel
+    seq = 0
+    for t in toks[dt_idx + dt_span:]:
+        if _H_NUM.match(t):
+            seq = int(t)
+            break
+
+    # Filter + Objekt je nach Layout
+    flt = None
+    if type_idx is not None and 0 < type_idx < exp_idx:
+        # E127: <obj>_TYP_[filter]_<exp>s_…
+        obj = "_".join(toks[:type_idx]).strip()
+        between = toks[type_idx + 1:exp_idx]
+    else:
+        # ASIAir: TYP_<obj…>_<exp>s_Bin_[filter]_<datum>_…
+        start = (type_idx + 1) if (type_idx is not None and type_idx < exp_idx) else 0
+        obj = "_".join(toks[start:exp_idx]).strip()
+        between = toks[bin_idx + 1:dt_idx]   # zwischen Bin und Datum
+    for cand in between:
+        if (_H_NUM.match(cand) or _H_EXP.match(cand) or _H_BIN.match(cand)
+                or _H_TEMP.match(cand) or _H_DEG.match(cand)):
+            continue
+        flt = cand
+        break
+
+    return ParsedFrame(
+        frame_type=ftype,
+        object_name=obj,
+        exposure_s=float(exp_m.group(1)),
+        binning=int(bin_m.group(1)),
+        filter_letter=flt,
+        filter_name=canonical_filter(flt) if flt else None,
+        captured_at=captured,
+        sequence=seq,
         ext=ext,
         filename=name,
     )
