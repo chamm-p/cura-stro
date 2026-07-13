@@ -12,10 +12,13 @@ Alle Methoden sind blockierend (smbclient); Aufrufer wrappen via
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 
 from app.services import asiair as asi
+
+logger = logging.getLogger("uvicorn.error")
 
 # Marker-Datei im Wurzelverzeichnis der Freigabe → Wiedererkennung trotz
 # IP-Wechsel. (Löschen unterstützt die ASIAir-Samba per Gast nicht, daher
@@ -116,26 +119,56 @@ class AsiairClient:
             unc += "\\" + self.base.replace("/", "\\")
         return unc
 
-    def scan(self, max_files: int = 8000) -> list[dict]:
-        """Walkt die Freigabe und liefert Light-Subs: {path, name, parsed}."""
+    def scan(self, max_files: int = 8000, max_depth: int = 10) -> list[dict]:
+        """Durchsucht die Freigabe REKURSIV und liefert Light-Subs:
+        {path, name, parsed}.
+
+        Bewusst eigene Rekursion (statt smbclient.walk): walk überspringt
+        Unterverzeichnisse still, wenn deren Auflistung scheitert — dann würde
+        nur die oberste Ebene geprüft. Hier wird jedes Verzeichnis explizit
+        betreten, Fehler je Ordner werden geloggt (nicht abgebrochen), und die
+        Tiefe ist begrenzt (Loop-Schutz)."""
         import smbclient
         root = self._root_unc()
         found: list[dict] = []
+        scanned_dirs = 0
         try:
             self._connect()
-            for dirpath, _dirs, files in smbclient.walk(root):
-                for fn in files:
-                    parsed = asi.parse_frame_filename(fn)
-                    if parsed and parsed.is_light:
-                        found.append({
-                            "path": dirpath.rstrip("\\") + "\\" + fn,
-                            "name": fn,
-                            "parsed": parsed,
-                        })
-                        if len(found) >= max_files:
-                            return found
         except Exception as e:  # noqa: BLE001
-            raise AsiairError(f"Scan fehlgeschlagen: {e}")
+            raise AsiairError(f"Verbindung zur ASIAir fehlgeschlagen: {e}")
+
+        # Iterativer Tiefendurchlauf (Stack), damit ein einzelner unlesbarer
+        # Unterordner nicht den ganzen Scan kippt. scandir liefert is_dir()
+        # aus der Verzeichnis-Enumeration (kein Extra-Roundtrip pro Datei).
+        stack: list[tuple[str, int]] = [(root, 0)]
+        while stack:
+            path, depth = stack.pop()
+            scanned_dirs += 1
+            try:
+                entries = list(smbclient.scandir(path))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("ASIAir-Scan: Verzeichnis nicht lesbar — %s: %s", path, e)
+                continue
+            for ent in entries:
+                name = ent.name
+                if name in (".", ".."):
+                    continue
+                child = path.rstrip("\\") + "\\" + name
+                try:
+                    is_dir = ent.is_dir()
+                except Exception:  # noqa: BLE001
+                    is_dir = False
+                if is_dir:
+                    if depth < max_depth:
+                        stack.append((child, depth + 1))
+                    continue
+                parsed = asi.parse_frame_filename(name)
+                if parsed and parsed.is_light:
+                    found.append({"path": child, "name": name, "parsed": parsed})
+                    if len(found) >= max_files:
+                        logger.info("ASIAir-Scan: Limit %d erreicht (%d Ordner durchsucht)", max_files, scanned_dirs)
+                        return found
+        logger.info("ASIAir-Scan: %d Light-Sub(s) in %d Ordner(n) gefunden", len(found), scanned_dirs)
         return found
 
     def read_to_temp(self, path: str, tmpdir: str) -> tuple[str, int]:
