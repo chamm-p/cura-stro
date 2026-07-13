@@ -225,7 +225,12 @@ async def scan_rig(rig_id: str, user: User = Depends(get_current_user), db: Asyn
             "nights": len(g["nights"]),
         })
     scope = await db.get(Telescope, rig.telescope_id) if rig.telescope_id else None
-    return {"total_files": len(files), "telescope": scope.name if scope else None, "objects": out}
+    return {
+        "total_files": len(files),
+        "telescope": scope.name if scope else None,
+        "objects": out,
+        "diagnostics": getattr(client, "last_scan_stats", {}),
+    }
 
 
 async def _upsert_observation(db: AsyncSession, user: User, cat: CatalogObject | None,

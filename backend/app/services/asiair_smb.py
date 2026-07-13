@@ -96,6 +96,7 @@ class AsiairClient:
         # ASIAir-Samba erlaubt Gast — Default „guest", kein Passwort.
         self.user = user or "guest"
         self.password = password or ""
+        self.last_scan_stats: dict = {}
         if not self.host:
             raise AsiairError("ASIAir-Host/IP fehlt.")
         if not self.share:
@@ -132,10 +133,23 @@ class AsiairClient:
         root = self._root_unc()
         found: list[dict] = []
         scanned_dirs = 0
+        files_seen = 0
+        unmatched: list[str] = []      # Beispiel-Dateien, die NICHT als Light erkannt wurden
+        dir_names: list[str] = []      # Beispiel-Unterordner (zur Diagnose der Rekursion)
         try:
             self._connect()
         except Exception as e:  # noqa: BLE001
             raise AsiairError(f"Verbindung zur ASIAir fehlgeschlagen: {e}")
+
+        def _looks_like_dir(ent, name: str) -> bool:
+            try:
+                if ent.is_dir():
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+            # Manche ASIAir-Samba-Firmwares melden Attribute unzuverlässig:
+            # Einträge ohne Datei-Endung als Ordner behandeln (Fallback).
+            return "." not in name
 
         # Iterativer Tiefendurchlauf (Stack), damit ein einzelner unlesbarer
         # Unterordner nicht den ganzen Scan kippt. scandir liefert is_dir()
@@ -154,21 +168,35 @@ class AsiairClient:
                 if name in (".", ".."):
                     continue
                 child = path.rstrip("\\") + "\\" + name
-                try:
-                    is_dir = ent.is_dir()
-                except Exception:  # noqa: BLE001
-                    is_dir = False
-                if is_dir:
+                if _looks_like_dir(ent, name):
+                    if len(dir_names) < 20:
+                        dir_names.append(name)
                     if depth < max_depth:
                         stack.append((child, depth + 1))
                     continue
+                files_seen += 1
                 parsed = asi.parse_frame_filename(name)
                 if parsed and parsed.is_light:
                     found.append({"path": child, "name": name, "parsed": parsed})
                     if len(found) >= max_files:
-                        logger.info("ASIAir-Scan: Limit %d erreicht (%d Ordner durchsucht)", max_files, scanned_dirs)
-                        return found
-        logger.info("ASIAir-Scan: %d Light-Sub(s) in %d Ordner(n) gefunden", len(found), scanned_dirs)
+                        break
+                elif len(unmatched) < 15:
+                    unmatched.append(name)
+            if len(found) >= max_files:
+                break
+
+        self.last_scan_stats = {
+            "dirs_scanned": scanned_dirs,
+            "files_seen": files_seen,
+            "lights_found": len(found),
+            "unmatched_samples": unmatched,
+            "dir_samples": dir_names,
+        }
+        logger.info("ASIAir-Scan: %d Light-Sub(s) | %d Dateien gesehen | %d Ordner | root=%s",
+                    len(found), files_seen, scanned_dirs, root)
+        if not found:
+            logger.warning("ASIAir-Scan: KEINE Lights. Beispiel-Dateien: %s | Beispiel-Ordner: %s",
+                            unmatched[:8], dir_names[:8])
         return found
 
     def read_to_temp(self, path: str, tmpdir: str) -> tuple[str, int]:

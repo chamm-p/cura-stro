@@ -9,7 +9,8 @@ interface ScanObj {
   object: string; normalized: string; matched_ident: string | null; matched_name: string | null
   subs: number; filters: FilterAgg[]; nights: number
 }
-interface ScanResult { total_files: number; telescope: string | null; objects: ScanObj[] }
+interface ScanDiag { dirs_scanned?: number; files_seen?: number; lights_found?: number; unmatched_samples?: string[]; dir_samples?: string[] }
+interface ScanResult { total_files: number; telescope: string | null; objects: ScanObj[]; diagnostics?: ScanDiag }
 
 export default function AsiairImportModal({ onClose, onImported }: { onClose: () => void; onImported: () => void }) {
   const [rigs, setRigs] = useState<Rig[]>([])
@@ -118,7 +119,28 @@ export default function AsiairImportModal({ onClose, onImported }: { onClose: ()
               <div className="mt-4">
                 <div className="mb-2 text-xs text-slate-400">{scan.total_files} Light-Subs gefunden · Gerät: {scan.telescope || '—'}</div>
                 {scan.objects.length === 0 ? (
-                  <p className="text-sm text-slate-500">Keine Light-Subs auf der ASIAir gefunden.</p>
+                  <div className="rounded-lg border border-amber-400/30 bg-amber-500/10 p-3 text-xs text-amber-200">
+                    <div className="font-medium">Keine Light-Subs erkannt.</div>
+                    {scan.diagnostics && (
+                      <div className="mt-1.5 space-y-1 text-amber-200/90">
+                        <div>{scan.diagnostics.files_seen ?? 0} Datei(en) in {scan.diagnostics.dirs_scanned ?? 0} Ordner(n) durchsucht.</div>
+                        {scan.diagnostics.unmatched_samples && scan.diagnostics.unmatched_samples.length > 0 && (
+                          <div>
+                            <div className="text-amber-300">Beispiel-Dateien (nicht als Light erkannt):</div>
+                            <ul className="ml-3 list-disc break-all font-mono text-[11px]">
+                              {scan.diagnostics.unmatched_samples.slice(0, 6).map((n, i) => <li key={i}>{n}</li>)}
+                            </ul>
+                          </div>
+                        )}
+                        {scan.diagnostics.dir_samples && scan.diagnostics.dir_samples.length > 0 && (
+                          <div className="text-amber-200/70">Ordner: {scan.diagnostics.dir_samples.slice(0, 8).join(', ')}</div>
+                        )}
+                        {(scan.diagnostics.files_seen ?? 0) === 0 && (
+                          <div className="text-amber-300">Es wurden gar keine Dateien gelesen — Freigabe/Unterordner evtl. nicht erreichbar.</div>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 ) : (
                   <div className="space-y-1.5">
                     {scan.objects.map((o) => (
