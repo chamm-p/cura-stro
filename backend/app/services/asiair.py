@@ -49,16 +49,19 @@ _KNOWN_TYPES = (
     | OTHER_TYPES
 )
 
-# Dateiname-Muster. Filtergruppe optional (OSC ohne Filter):
-#   Light_<obj>_<exp>s_Bin<n>[_<filter>]_<YYYYMMDD>-<HHMMSS>_<seq>[.<ext>]
+# Dateiname-Muster. Filtergruppe optional (OSC ohne Filter). Zwischen
+# Zeitstempel und Sequenznummer können neuere ASIAir-Firmwares beliebige
+# Extra-Tokens einschieben (z. B. '333deg' = Rotator-/PA-Winkel):
+#   Light_<obj>_<exp>s_Bin<n>[_<filter>]_<YYYYMMDD>-<HHMMSS>[_<extra>…]_<seq>[.<ext>]
 _PATTERN = re.compile(
     r"^(?P<type>[A-Za-z][A-Za-z ]*?)_"
     r"(?P<obj>.+?)_"
     r"(?P<exp>\d+(?:\.\d+)?)s_"
     r"Bin(?P<bin>\d+)_"
     r"(?:(?P<filter>[^_]+)_)?"
-    r"(?P<date>\d{8})-(?P<time>\d{6})_"
-    r"(?P<seq>\d+)"
+    r"(?P<date>\d{8})-(?P<time>\d{6})"
+    r"(?:_[^_]+)*?"                       # optionale Extra-Tokens (z. B. 333deg)
+    r"_(?P<seq>\d+)"
     r"(?:\.(?P<ext>[A-Za-z0-9]+))?$"
 )
 
@@ -69,8 +72,9 @@ _PATTERN_NOTYPE = re.compile(
     r"(?P<exp>\d+(?:\.\d+)?)s_"
     r"Bin(?P<bin>\d+)_"
     r"(?:(?P<filter>[^_]+)_)?"
-    r"(?P<date>\d{8})-(?P<time>\d{6})_"
-    r"(?P<seq>\d+)"
+    r"(?P<date>\d{8})-(?P<time>\d{6})"
+    r"(?:_[^_]+)*?"                       # optionale Extra-Tokens (z. B. 333deg)
+    r"_(?P<seq>\d+)"
     r"(?:\.(?P<ext>[A-Za-z0-9]+))?$"
 )
 
