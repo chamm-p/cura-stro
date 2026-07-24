@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Stars, CloudMoon, ListChecks, Cloud, Moon, Images, Clock, AlertTriangle, Wind } from 'lucide-react'
+import { Stars, CloudMoon, ListChecks, Cloud, Moon, Images, Clock, AlertTriangle, Wind, Globe } from 'lucide-react'
 import { useAuthStore } from '../store/auth'
 import api from '../services/api'
 import Layout from '../components/Layout'
@@ -63,6 +63,12 @@ export default function Dashboard() {
           <h3 className="font-semibold">Slideshow</h3>
           <p className="mt-1 text-sm text-slate-400">Deine besten Astrofotos im Vollbild (Rating ≥ 3).</p>
         </button>
+
+        <Link to="/solar-system" className={cls}>
+          <Globe className="mb-3 h-7 w-7 text-indigo-300" />
+          <h3 className="font-semibold">Sonnensystem</h3>
+          <p className="mt-1 text-sm text-slate-400">Interaktives 3D-Modell aller Planeten mit Kepler-Bahnen.</p>
+        </Link>
       </div>
 
       {showSlides && <Slideshow onClose={() => setShowSlides(false)} />}

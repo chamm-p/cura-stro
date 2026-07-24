@@ -37,7 +37,8 @@ def _guest_session(host: str):
 
 
 def _marker_unc(host: str, share: str) -> str:
-    return rf"\\{host}\{(share or '').strip('/\\')}\{MARKER_NAME}"
+    s = (share or "").strip("/\\")
+    return rf"\\{host}\{s}\{MARKER_NAME}"
 
 
 def write_marker(host: str, share: str, payload: dict) -> None:
@@ -62,13 +63,15 @@ def detect_share(host: str) -> str | None:
         return None
     for sh in STD_SHARES:
         try:
-            if smbpath.exists(rf"\\{host}\{sh}\Autorun"):
+            autorun_path = rf"\\{host}\{sh}\Autorun"
+            if smbpath.exists(autorun_path):
                 return sh
         except Exception:  # noqa: BLE001
             continue
     for sh in STD_SHARES:
         try:
-            smbclient.listdir(rf"\\{host}\{sh}")
+            share_path = rf"\\{host}\{sh}"
+            smbclient.listdir(share_path)
             return sh
         except Exception:  # noqa: BLE001
             continue

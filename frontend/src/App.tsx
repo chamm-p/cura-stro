@@ -5,6 +5,7 @@ import Settings from './pages/Settings'
 import Targets from './pages/Targets'
 import Manage from './pages/Manage'
 import Calculator from './pages/Calculator'
+import SolarSystem from './pages/SolarSystem'
 import ProtectedRoute from './components/ProtectedRoute'
 
 export default function App() {
@@ -40,6 +41,14 @@ export default function App() {
         element={
           <ProtectedRoute>
             <Calculator />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/solar-system"
+        element={
+          <ProtectedRoute>
+            <SolarSystem />
           </ProtectedRoute>
         }
       />
