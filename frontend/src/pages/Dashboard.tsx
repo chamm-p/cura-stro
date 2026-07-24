@@ -64,7 +64,7 @@ export default function Dashboard() {
           <p className="mt-1 text-sm text-slate-400">Deine besten Astrofotos im Vollbild (Rating ≥ 3).</p>
         </button>
 
-        <Link to="/solar-system" className={cls}>
+        <Link to="/solarsystem" className={cls}>
           <Globe className="mb-3 h-7 w-7 text-indigo-300" />
           <h3 className="font-semibold">Sonnensystem</h3>
           <p className="mt-1 text-sm text-slate-400">Interaktives 3D-Modell aller Planeten mit Kepler-Bahnen.</p>

@@ -1,35 +1,13 @@
-import { useState, useRef, useMemo, useCallback, Suspense } from 'react'
+import { useState, useRef, useMemo, useCallback, useEffect } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { OrbitControls, Stars, Html } from '@react-three/drei'
+import { OrbitControls, Stars } from '@react-three/drei'
+import * as THREE from 'three'
 import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Info, ChevronLeft, ChevronRight, Play, Pause, ZoomIn, ZoomOut } from 'lucide-react'
-import Layout from '../components/Layout'
+import { X, ChevronLeft, ChevronRight, Play, Pause, ZoomIn, ZoomOut } from 'lucide-react'
 
 // ─── Kepler-Elemente (J2000.0) ───────────────────────────────────────────────
-interface PlanetData {
-  name: string
-  nameDE: string
-  color: string
-  radius: number          // relative Größe (Erde = 1)
-  semiMajorAxis: number   // AU
-  eccentricity: number
-  inclination: number     // Grad
-  period: number          // Erdjahre
-  rotationPeriod: number  // Stunden
-  axialTilt: number       // Grad
-  moons: number
-  atmosphere: string
-  temperature: string
-  mass: string
-  discovery: string
-  description: string
-  ringColor?: string
-  ringInner?: number
-  ringOuter?: number
-}
-
-const PLANETS: PlanetData[] = [
+const PLANETS = [
   {
     name: 'Mercury', nameDE: 'Merkur', color: '#b5a7a7',
     radius: 0.383, semiMajorAxis: 0.387, eccentricity: 0.2056,
@@ -109,10 +87,9 @@ const PLANETS: PlanetData[] = [
 ]
 
 // ─── Hilfsfunktionen ─────────────────────────────────────────────────────────
-function keplerOrbit(a: number, e: number, i: number, t: number): [number, number, number] {
-  // Vereinfachte Kepler-Berechnung
-  const M = (2 * Math.PI * t) / (a ** 1.5) // Mean anomaly
-  let E = M // Startwert für Newton-Iteration
+function keplerOrbit(a, e, i, t) {
+  const M = (2 * Math.PI * t) / (a ** 1.5)
+  let E = M
   for (let j = 0; j < 10; j++) {
     E = E - (E - e * Math.sin(E) - M) / (1 - e * Math.cos(E))
   }
@@ -128,9 +105,9 @@ function keplerOrbit(a: number, e: number, i: number, t: number): [number, numbe
 }
 
 // ─── Sonne ───────────────────────────────────────────────────────────────────
-function Sun({ onClick }: { onClick: () => void }) {
-  const sunRef = useRef<THREE.Mesh>(null)
-  const pulseRef = useRef<THREE.Mesh>(null)
+function Sun({ onClick }) {
+  const sunRef = useRef(null)
+  const pulseRef = useRef(null)
 
   useFrame(({ clock }) => {
     if (sunRef.current) {
@@ -144,7 +121,6 @@ function Sun({ onClick }: { onClick: () => void }) {
 
   return (
     <group onClick={onClick}>
-      {/* Sonne */}
       <mesh ref={sunRef} position={[0, 0, 0]}>
         <sphereGeometry args={[1.8, 64, 64]} />
         <meshStandardMaterial
@@ -155,7 +131,6 @@ function Sun({ onClick }: { onClick: () => void }) {
           metalness={0.1}
         />
       </mesh>
-      {/* Glow-Puls */}
       <mesh ref={pulseRef} position={[0, 0, 0]}>
         <sphereGeometry args={[2.2, 32, 32]} />
         <meshStandardMaterial
@@ -166,7 +141,6 @@ function Sun({ onClick }: { onClick: () => void }) {
           opacity={0.3}
         />
       </mesh>
-      {/* Corona */}
       <mesh position={[0, 0, 0]}>
         <sphereGeometry args={[3.5, 32, 32]} />
         <meshStandardMaterial
@@ -181,29 +155,53 @@ function Sun({ onClick }: { onClick: () => void }) {
   )
 }
 
+// ─── Planeten-Label ──────────────────────────────────────────────────────────
+function PlanetLabel({ position, text }) {
+  const canvasRef = useRef(null)
+  const spriteRef = useRef(null)
+
+  useEffect(() => {
+    if (!canvasRef.current || !spriteRef.current) return
+    const canvas = canvasRef.current
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    canvas.width = 256
+    canvas.height = 64
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    ctx.font = 'bold 28px Inter, sans-serif'
+    ctx.fillStyle = '#e0e0e0'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.shadowColor = 'rgba(0,0,0,0.8)'
+    ctx.shadowBlur = 8
+    ctx.fillText(text, canvas.width / 2, canvas.height / 2)
+
+    const texture = new THREE.CanvasTexture(canvas)
+    texture.needsUpdate = true
+    spriteRef.current.material.map = texture
+    spriteRef.current.material.needsUpdate = true
+  }, [text])
+
+  return (
+    <mesh ref={spriteRef} position={position} scale={[1.2, 0.3, 1]} rotation={[-Math.PI / 2, 0, 0]}>
+      <planeGeometry args={[1.2, 0.3]} />
+      <meshBasicMaterial transparent depthWrite={false} />
+    </mesh>
+  )
+}
+
 // ─── Planet ──────────────────────────────────────────────────────────────────
-function Planet({
-  data,
-  time,
-  scale,
-  onClick,
-}: {
-  data: PlanetData
-  time: number
-  scale: number
-  onClick: () => void
-}) {
-  const meshRef = useRef<THREE.Mesh>(null)
-  const orbitRef = useRef<THREE.Line>(null)
+function Planet({ data, time, scale, onClick }) {
+  const meshRef = useRef(null)
 
   const pos = useMemo(() => {
     const [x, y, z] = keplerOrbit(data.semiMajorAxis * scale, data.eccentricity, data.inclination, time)
-    return [x, y, z] as [number, number, number]
+    return [x, y, z]
   }, [data, time, scale])
 
-  // Orbit-Path
   const orbitPath = useMemo(() => {
-    const points: [number, number, number][] = []
+    const points = []
     const segments = 128
     for (let i = 0; i <= segments; i++) {
       const t = (i / segments) * time + (time * 0.01)
@@ -213,7 +211,6 @@ function Planet({
     return points
   }, [data, time, scale])
 
-  // Rotation
   useFrame(({ clock }) => {
     if (meshRef.current) {
       const rotSpeed = (2 * Math.PI) / (Math.abs(data.rotationPeriod) / 24)
@@ -225,7 +222,6 @@ function Planet({
 
   return (
     <group position={pos} onClick={onClick}>
-      {/* Planet */}
       <mesh ref={meshRef}>
         <sphereGeometry args={[displayRadius, 32, 32]} />
         <meshStandardMaterial
@@ -235,10 +231,9 @@ function Planet({
         />
       </mesh>
 
-      {/* Ringe (Saturn, Uranus, Jupiter, Neptune) */}
       {data.ringColor && (
         <mesh rotation={[Math.PI / 2.5, 0, 0]}>
-          <ringGeometry args={[displayRadius * data.ringInner!, displayRadius * data.ringOuter!, 64]} />
+          <ringGeometry args={[displayRadius * data.ringInner, displayRadius * data.ringOuter, 64]} />
           <meshStandardMaterial
             color={data.ringColor}
             transparent
@@ -248,8 +243,7 @@ function Planet({
         </mesh>
       )}
 
-      {/* Orbit-Linie */}
-      <line ref={orbitRef}>
+      <line>
         <bufferGeometry>
           <float32BufferAttribute
             attach="attributes-position"
@@ -259,24 +253,13 @@ function Planet({
         <lineBasicMaterial color="#ffffff" transparent opacity={0.15} />
       </line>
 
-      {/* Name-Label */}
-      <Html position={[0, displayRadius + 0.2, 0]} center style={{ pointerEvents: 'none' }}>
-        <span style={{
-          color: '#e0e0e0',
-          fontSize: '11px',
-          fontFamily: 'Inter, sans-serif',
-          whiteSpace: 'nowrap',
-          textShadow: '0 0 8px rgba(0,0,0,0.8)',
-        }}>
-          {data.nameDE}
-        </span>
-      </Html>
+      <PlanetLabel position={[0, displayRadius + 0.2, 0]} text={data.nameDE} />
     </group>
   )
 }
 
 // ─── Planeten-Info-Panel ─────────────────────────────────────────────────────
-function PlanetInfoPanel({ planet, onClose }: { planet: PlanetData | null; onClose: () => void }) {
+function PlanetInfoPanel({ planet, onClose }) {
   if (!planet) return null
 
   return (
@@ -326,7 +309,7 @@ function PlanetInfoPanel({ planet, onClose }: { planet: PlanetData | null; onClo
   )
 }
 
-function InfoPanelItem({ label, value }: { label: string; value: string }) {
+function InfoPanelItem({ label, value }) {
   return (
     <div className="rounded-lg bg-white/5 px-3 py-2">
       <div className="text-[10px] uppercase tracking-wider text-slate-500">{label}</div>
@@ -335,22 +318,8 @@ function InfoPanelItem({ label, value }: { label: string; value: string }) {
   )
 }
 
-// ─── Überraschung: "Zeitreise"-Slider ────────────────────────────────────────
-function TimeTravelSlider({
-  time,
-  setTime,
-  playing,
-  setPlaying,
-  speed,
-  setSpeed,
-}: {
-  time: number
-  setTime: (t: number) => void
-  playing: boolean
-  setPlaying: (p: boolean) => void
-  speed: number
-  setSpeed: (s: number) => void
-}) {
+// ─── Zeitreise-Slider ────────────────────────────────────────────────────────
+function TimeTravelSlider({ time, setTime, playing, setPlaying, speed, setSpeed }) {
   return (
     <div className="absolute top-6 right-6 flex items-center gap-3 rounded-xl border border-white/10 bg-[#0c1024]/90 px-4 py-2 backdrop-blur-xl">
       <button
@@ -401,68 +370,24 @@ function TimeTravelSlider({
   )
 }
 
-// ─── Überraschung: "Sternschnuppe" ───────────────────────────────────────────
-function ShootingStar({ active }: { active: boolean }) {
-  const ref = useRef<THREE.Mesh>(null)
-
-  useFrame(({ clock }) => {
-    if (ref.current && active) {
-      const t = clock.getElapsedTime()
-      ref.current.position.set(
-        Math.cos(t * 0.5) * 15,
-        Math.sin(t * 0.3) * 5 + 3,
-        Math.sin(t * 0.5) * 15
-      )
-      ref.current.rotation.z = t * 2
-    }
-  })
-
-  if (!active) return null
-
-  return (
-    <mesh ref={ref}>
-      <sphereGeometry args={[0.05, 8, 8]} />
-      <meshStandardMaterial color="#ffffff" emissive="#ffffff" emissiveIntensity={3} />
-    </mesh>
-  )
-}
-
 // ─── Haupt-Canvas ────────────────────────────────────────────────────────────
-function SolarSystemCanvas({
-  selectedPlanet,
-  setSelectedPlanet,
-}: {
-  selectedPlanet: PlanetData | null
-  setSelectedPlanet: (p: PlanetData | null) => void
-}) {
+function SolarSystemCanvas({ selectedPlanet, setSelectedPlanet }) {
   const [time, setTime] = useState(0)
   const [playing, setPlaying] = useState(true)
   const [speed, setSpeed] = useState(1)
-  const [showShootingStar, setShowShootingStar] = useState(false)
   const { camera } = useThree()
 
-  // Zeit-Update
   useFrame(({ clock }) => {
     if (playing) {
       setTime((prev) => prev + clock.getDelta() * speed * 2)
     }
   })
 
-  // Zufällige Sternschnuppen
-  useFrame(({ clock }) => {
-    if (Math.random() < 0.001) {
-      setShowShootingStar(true)
-      setTimeout(() => setShowShootingStar(false), 1500)
-    }
-  })
-
-  // Kamera-Reset
   const resetCamera = useCallback(() => {
     camera.position.set(0, 12, 20)
     camera.lookAt(0, 0, 0)
   }, [camera])
 
-  // Zoom
   const zoomIn = useCallback(() => {
     camera.position.multiplyScalar(0.8)
   }, [camera])
@@ -471,7 +396,7 @@ function SolarSystemCanvas({
     camera.position.multiplyScalar(1.25)
   }, [camera])
 
-  const scale = 2.5 // Skalierungsfaktor für die Bahnen
+  const scale = 2.5
 
   return (
     <>
@@ -500,8 +425,6 @@ function SolarSystemCanvas({
         />
       ))}
 
-      <ShootingStar active={showShootingStar} />
-
       <OrbitControls
         enablePan={true}
         enableZoom={true}
@@ -511,7 +434,6 @@ function SolarSystemCanvas({
         autoRotateSpeed={0.5}
       />
 
-      {/* Postprocessing */}
       <EffectComposer>
         <Bloom
           intensity={0.6}
@@ -525,7 +447,6 @@ function SolarSystemCanvas({
         />
       </EffectComposer>
 
-      {/* UI-Overlays */}
       <TimeTravelSlider
         time={time}
         setTime={setTime}
@@ -536,7 +457,6 @@ function SolarSystemCanvas({
       />
 
       <div className="absolute top-6 left-6 flex items-center gap-2 rounded-xl border border-white/10 bg-[#0c1024]/90 px-4 py-2 backdrop-blur-xl">
-        <Stars className="h-4 w-4 text-indigo-400" />
         <span className="text-sm font-semibold text-white">Sonnensystem</span>
       </div>
 
@@ -574,28 +494,22 @@ function SolarSystemCanvas({
 }
 
 // ─── Hauptkomponente ─────────────────────────────────────────────────────────
-export default function SolarSystem() {
-  const [selectedPlanet, setSelectedPlanet] = useState<PlanetData | null>(null)
+export default function SolarSystemPage() {
+  const [selectedPlanet, setSelectedPlanet] = useState(null)
 
   return (
-    <Layout wide>
-      <div className="relative h-[70vh] w-full overflow-hidden rounded-2xl border border-white/10 bg-[#05060f]">
-        <Suspense fallback={
-          <div className="flex h-full items-center justify-center">
-            <div className="text-slate-400">Lade Sonnensystem …</div>
-          </div>
-        }>
-          <Canvas
-            camera={{ position: [0, 12, 20], fov: 50 }}
-            gl={{ antialias: true, alpha: false }}
-          >
-            <SolarSystemCanvas
-              selectedPlanet={selectedPlanet}
-              setSelectedPlanet={setSelectedPlanet}
-            />
-          </Canvas>
-        </Suspense>
-      </div>
-    </Layout>
+    <div className="relative h-[70vh] w-full overflow-hidden rounded-2xl border border-white/10 bg-[#05060f]">
+      <h1 className="absolute top-4 left-6 z-10 text-2xl font-bold text-white">Sonnensystem</h1>
+      <Canvas
+        camera={{ position: [0, 12, 20], fov: 50 }}
+        gl={{ antialias: true, alpha: false }}
+        style={{ background: 'var(--bg)' }}
+      >
+        <SolarSystemCanvas
+          selectedPlanet={selectedPlanet}
+          setSelectedPlanet={setSelectedPlanet}
+        />
+      </Canvas>
+    </div>
   )
 }
