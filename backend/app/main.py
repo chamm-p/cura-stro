@@ -19,6 +19,7 @@ from app.api import auth, calculator, equipment, geocode, health, images, locati
 from app.api import archive, asiair, clouds as clouds_api, file_import, mcp_config, results as results_api, slideshow, subframes
 from app.api import pixinsight as pixinsight_api
 from app.api import settings as settings_api
+from app.api import solarsystem
 from app.config import get_settings
 from app.core.security import hash_password
 from app.database import async_session
@@ -158,6 +159,7 @@ app.include_router(archive.router)
 app.include_router(clouds_api.router)
 app.include_router(results_api.router)
 app.include_router(pixinsight_api.router)
+app.include_router(solarsystem.router, prefix="/api/solarsystem")
 
 
 @app.get("/")

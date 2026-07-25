@@ -84,7 +84,7 @@ services:
     container_name: curastro-frontend
     restart: unless-stopped
     ports:
-      - "${FRONTEND_PORT:-9601}:80"
+      - "${FRONTEND_PORT:-3000}:80"
     depends_on:
       - backend
     networks: [curastro-net]

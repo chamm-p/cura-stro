@@ -1,6 +1,7 @@
 # Python
 __pycache__/
 *.py[cod]
+*.pyc
 .venv/
 venv/
 
@@ -11,9 +12,12 @@ dist/
 # Env / Secrets
 deploy/.env
 *.local
+*.fits
+*.tif
 
 # OS
 .DS_Store
+Thumbs.db
 
 # Outputs / Uploads
 backend/outputs/
