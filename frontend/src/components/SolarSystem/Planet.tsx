@@ -128,18 +128,17 @@ export default function Planet({ data, onClick, isSelected, moons, onMoonClick }
         />
       </mesh>
 
-      {isSelected && (
-        <mesh>
-          <sphereGeometry args={[size * 1.08, 64, 64]} />
-          <meshBasicMaterial
-            color={data.color}
-            wireframe
-            transparent
-            opacity={0.35}
-            depthWrite={false}
-          />
-        </mesh>
-      )}
+      {isSelected && (() => {
+        const edgeGeo = new THREE.EdgesGeometry(
+          new THREE.SphereGeometry(size * 1.12, 32, 16),
+          15
+        )
+        return (
+          <lineSegments geometry={edgeGeo}>
+            <lineBasicMaterial color={data.color} transparent opacity={0.6} />
+          </lineSegments>
+        )
+      })()}
 
       {/* Saturn-Ring — geneigte Scheibe um den Planeten */}
       {hasRing && (
@@ -198,18 +197,17 @@ export default function Planet({ data, onClick, isSelected, moons, onMoonClick }
                 emissiveIntensity={0}
               />
             </mesh>
-            {hoveredMoon === i && (
-              <mesh>
-                <sphereGeometry args={[moonSize * 1.15, 32, 32]} />
-                <meshBasicMaterial
-                  color={moon.color}
-                  wireframe
-                  transparent
-                  opacity={0.4}
-                  depthWrite={false}
-                />
-              </mesh>
-            )}
+            {hoveredMoon === i && (() => {
+              const moonEdgeGeo = new THREE.EdgesGeometry(
+                new THREE.SphereGeometry(moonSize * 1.2, 24, 12),
+                15
+              )
+              return (
+                <lineSegments geometry={moonEdgeGeo}>
+                  <lineBasicMaterial color={moon.color} transparent opacity={0.6} />
+                </lineSegments>
+              )
+            })()}
           </group>
         )
       })}
