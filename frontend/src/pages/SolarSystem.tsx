@@ -88,7 +88,6 @@ export default function SolarSystem() {
 
   return (
     <div className="relative w-full h-screen bg-black">
-      <audio autoPlay loop src="/assets/ambient.mp3" />
       <div className="absolute top-4 left-4 z-10">
         <Link
           to="/"

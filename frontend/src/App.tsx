@@ -7,56 +7,60 @@ import Manage from './pages/Manage'
 import Calculator from './pages/Calculator'
 import SolarSystem from './pages/SolarSystem'
 import ProtectedRoute from './components/ProtectedRoute'
+import AmbientPlayer from './components/AmbientPlayer'
 
 export default function App() {
   return (
-    <Routes>
-      <Route path="/login" element={<Login />} />
-      <Route
-        path="/"
-        element={
-          <ProtectedRoute>
-            <Dashboard />
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/targets"
-        element={
-          <ProtectedRoute>
-            <Targets />
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/manage"
-        element={
-          <ProtectedRoute>
-            <Manage />
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/calculator"
-        element={
-          <ProtectedRoute>
-            <Calculator />
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/solarsystem"
-        element={<SolarSystem />}
-      />
-      <Route
-        path="/settings"
-        element={
-          <ProtectedRoute>
-            <Settings />
-          </ProtectedRoute>
-        }
-      />
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+    <>
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route
+          path="/"
+          element={
+            <ProtectedRoute>
+              <Dashboard />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/targets"
+          element={
+            <ProtectedRoute>
+              <Targets />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/manage"
+          element={
+            <ProtectedRoute>
+              <Manage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/calculator"
+          element={
+            <ProtectedRoute>
+              <Calculator />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/solarsystem"
+          element={<SolarSystem />}
+        />
+        <Route
+          path="/settings"
+          element={
+            <ProtectedRoute>
+              <Settings />
+            </ProtectedRoute>
+          }
+        />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+      <AmbientPlayer />
+    </>
   )
 }
