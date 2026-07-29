@@ -11,5 +11,5 @@ export default function AmbientPlayer() {
     document.addEventListener('click', tryPlay, { once: true });
     return () => document.removeEventListener('click', tryPlay);
   }, []);
-  return <audio ref={ref} src="/audio/ambient.mp3" loop autoPlay preload="auto" hidden />;
+  return <audio ref={ref} src="/audio/atlasaudio-suspense-574030.mp3" loop autoPlay preload="auto" hidden />;
 }

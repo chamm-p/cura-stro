@@ -50,8 +50,6 @@ export default function Dashboard() {
           <p className="mt-1 text-sm text-slate-400">Gute Ziele für deinen Standort & die Nacht.</p>
         </Link>
 
-        <ConditionsCard />
-
         <Link to="/manage" className={cls}>
           <ListChecks className="mb-3 h-7 w-7 text-indigo-300" />
           <h3 className="font-semibold">Verwaltung</h3>
@@ -69,6 +67,8 @@ export default function Dashboard() {
           <h3 className="font-semibold">Sonnensystem</h3>
           <p className="mt-1 text-sm text-slate-400">Interaktives 3D-Modell aller Planeten mit Kepler-Bahnen.</p>
         </Link>
+
+        <ConditionsCard />
       </div>
 
       {showSlides && <Slideshow onClose={() => setShowSlides(false)} />}

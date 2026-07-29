@@ -125,7 +125,7 @@ export default function SolarSystem() {
         </Suspense>
       </Canvas>
 
-      <audio ref={audioRef} src="/audio/ambient.mp3" loop preload="auto" hidden />
+      <audio ref={audioRef} src="/audio/atlasaudio-suspense-574030.mp3" loop preload="auto" hidden />
 
       <TimeWarpSlider />
 

@@ -123,10 +123,23 @@ export default function Planet({ data, onClick, isSelected, moons, onMoonClick }
           map={texture}
           roughness={0.9}
           metalness={0.0}
-          emissive={isSelected ? data.color : '#000000'}
-          emissiveIntensity={isSelected ? 0.3 : 0}
+          emissive="#000000"
+          emissiveIntensity={0}
         />
       </mesh>
+
+      {isSelected && (
+        <mesh>
+          <sphereGeometry args={[size * 1.08, 64, 64]} />
+          <meshBasicMaterial
+            color={data.color}
+            wireframe
+            transparent
+            opacity={0.35}
+            depthWrite={false}
+          />
+        </mesh>
+      )}
 
       {/* Saturn-Ring — geneigte Scheibe um den Planeten */}
       {hasRing && (
@@ -181,10 +194,22 @@ export default function Planet({ data, onClick, isSelected, moons, onMoonClick }
                 map={moonTexture}
                 roughness={0.95}
                 metalness={0.0}
-                emissive={hoveredMoon === i ? moon.color : '#000000'}
-                emissiveIntensity={hoveredMoon === i ? 0.3 : 0}
+                emissive="#000000"
+                emissiveIntensity={0}
               />
             </mesh>
+            {hoveredMoon === i && (
+              <mesh>
+                <sphereGeometry args={[moonSize * 1.15, 32, 32]} />
+                <meshBasicMaterial
+                  color={moon.color}
+                  wireframe
+                  transparent
+                  opacity={0.4}
+                  depthWrite={false}
+                />
+              </mesh>
+            )}
           </group>
         )
       })}
