@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { MoonData } from '../../data/planets';
 
 type Vec3 = [number, number, number];
 
@@ -9,6 +10,7 @@ interface FlyTarget {
 
 interface SolarSystemState {
   selectedPlanet: string | null;
+  selectedMoon: MoonData | null;
   flyTarget: FlyTarget | null;
   isFlying: boolean;
   timeWarp: number;
@@ -17,6 +19,8 @@ interface SolarSystemState {
   planetPositions: Record<string, Vec3>;
   selectPlanet: (name: string, position: Vec3) => void;
   clearSelection: () => void;
+  selectMoon: (moonData: MoonData, position: Vec3) => void;
+  clearMoonSelection: () => void;
   setFlying: (v: boolean) => void;
   setTimeWarp: (v: number) => void;
   tickSimulation: (deltaSeconds: number) => void;
@@ -26,6 +30,7 @@ interface SolarSystemState {
 
 export const useSolarSystemStore = create<SolarSystemState>((set) => ({
   selectedPlanet: null,
+  selectedMoon: null,
   flyTarget: null,
   isFlying: false,
   timeWarp: 1,
@@ -35,7 +40,11 @@ export const useSolarSystemStore = create<SolarSystemState>((set) => ({
   selectPlanet: (name, position) =>
     set({ selectedPlanet: name, flyTarget: { position, name }, isFlying: true }),
   clearSelection: () =>
-    set({ selectedPlanet: null, flyTarget: null, isFlying: false }),
+    set({ selectedPlanet: null, selectedMoon: null, flyTarget: null, isFlying: false }),
+  selectMoon: (moonData, position) =>
+    set({ selectedMoon: moonData, selectedPlanet: null, flyTarget: { position, name: moonData.name }, isFlying: true }),
+  clearMoonSelection: () =>
+    set({ selectedMoon: null }),
   setFlying: (v) => set({ isFlying: v }),
   setTimeWarp: (v) => set({ timeWarp: v }),
   tickSimulation: (deltaSeconds) =>
@@ -47,6 +56,7 @@ export const useSolarSystemStore = create<SolarSystemState>((set) => ({
   resetView: () =>
     set((state) => ({
       selectedPlanet: null,
+      selectedMoon: null,
       flyTarget: null,
       isFlying: false,
       timeWarp: 1,

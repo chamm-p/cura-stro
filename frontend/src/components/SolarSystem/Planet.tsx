@@ -2,7 +2,7 @@ import { useRef, useState } from 'react'
 import * as THREE from 'three'
 import { useFrame } from '@react-three/fiber'
 import { useTexture } from '@react-three/drei'
-import { PlanetData } from '../../data/planets'
+import { PlanetData, MoonData } from '../../data/planets'
 import PlanetLabel from './PlanetLabel'
 import { useSolarSystemStore } from './store'
 
@@ -10,16 +10,24 @@ interface PlanetProps {
   data: PlanetData
   onClick: () => void
   isSelected: boolean
+  moons?: MoonData[]
+  onMoonClick?: (moonData: MoonData, moonPosition: [number, number, number]) => void
 }
 
-export default function Planet({ data, onClick, isSelected }: PlanetProps) {
+export default function Planet({ data, onClick, isSelected, moons, onMoonClick }: PlanetProps) {
   const groupRef = useRef<THREE.Group>(null)
   const spinRef = useRef<THREE.Mesh>(null)
   const angleRef = useRef(0)
   const spinRef2 = useRef(0)
   const [hovered, setHovered] = useState(false)
+  const [hoveredMoon, setHoveredMoon] = useState<number | null>(null)
   const texture = useTexture(data.textureMap)
   texture.colorSpace = THREE.SRGBColorSpace
+
+  // Monde: eigene Texturen laden
+  const moonTextures = useTexture(
+    moons?.map(m => m.textureMap) ?? []
+  )
 
   // Sichtbarer Planet — Wurzel-Skalierung dämpft Größenunterschiede.
   const size = Math.max(0.8, Math.sqrt(data.radius) * 0.8)
@@ -37,6 +45,10 @@ export default function Planet({ data, onClick, isSelected }: PlanetProps) {
   const e = data.eccentricity
   const b = a * Math.sqrt(1 - e * e)
   const incl = (data.inclination * Math.PI) / 180
+
+  // Mond-Refs
+  const moonRefs = useRef<(THREE.Group | null)[]>([])
+  const moonAngleRefs = useRef<number[]>(moons?.map(() => 0) ?? [])
 
   useFrame((state, delta) => {
     const timeWarp = useSolarSystemStore.getState().timeWarp
@@ -67,6 +79,23 @@ export default function Planet({ data, onClick, isSelected }: PlanetProps) {
     spinRef2.current += delta * rotSpeed * timeWarp * 0.5
     if (spinRef.current) {
       spinRef.current.rotation.y = spinRef2.current
+    }
+
+    // --- Monde: Ellipsenbahn um den Elternplaneten ---
+    if (moons) {
+      moons.forEach((moon, i) => {
+        moonAngleRefs.current[i] += (delta * 0.5 * timeWarp) / moon.period
+        const mTheta = moonAngleRefs.current[i]
+        const ma = moon.semiMajorAxis
+        const me = moon.eccentricity
+        const mb = ma * Math.sqrt(1 - me * me)
+        const mx = ma * (Math.cos(mTheta) - me)
+        const mz = mb * Math.sin(mTheta)
+        const my = 0
+        if (moonRefs.current[i]) {
+          moonRefs.current[i]!.position.set(mx, my, mz)
+        }
+      })
     }
   })
 
@@ -113,6 +142,52 @@ export default function Planet({ data, onClick, isSelected }: PlanetProps) {
           />
         </mesh>
       )}
+
+      {/* Monde — kleine Kugeln auf Ellipsenbahn um den Planeten */}
+      {moons?.map((moon, i) => {
+        const moonSize = Math.max(0.3, Math.sqrt(moon.radius) * 0.5)
+        const moonTexture = Array.isArray(moonTextures) ? moonTextures[i] : moonTextures
+        if (moonTexture) {
+          moonTexture.colorSpace = THREE.SRGBColorSpace
+        }
+        return (
+          <group key={moon.name} ref={(el) => (moonRefs.current[i] = el)}>
+            {/* Sichtbarer Mond */}
+            <mesh
+              onClick={(e) => {
+                e.stopPropagation()
+                if (onMoonClick && groupRef.current) {
+                  const pos: [number, number, number] = [
+                    groupRef.current.position.x + (moonRefs.current[i]?.position.x ?? 0),
+                    groupRef.current.position.y + (moonRefs.current[i]?.position.y ?? 0),
+                    groupRef.current.position.z + (moonRefs.current[i]?.position.z ?? 0),
+                  ]
+                  onMoonClick(moon, pos)
+                }
+              }}
+              onPointerOver={(e) => {
+                e.stopPropagation()
+                setHoveredMoon(i)
+                document.body.style.cursor = 'pointer'
+              }}
+              onPointerOut={(e) => {
+                e.stopPropagation()
+                setHoveredMoon(null)
+                document.body.style.cursor = 'default'
+              }}
+            >
+              <sphereGeometry args={[moonSize, 32, 32]} />
+              <meshStandardMaterial
+                map={moonTexture}
+                roughness={0.95}
+                metalness={0.0}
+                emissive={hoveredMoon === i ? moon.color : '#000000'}
+                emissiveIntensity={hoveredMoon === i ? 0.3 : 0}
+              />
+            </mesh>
+          </group>
+        )
+      })}
 
       {/* Unsichtbarer Treffer-Mesh — erleichtert Hover & Klick */}
       <mesh

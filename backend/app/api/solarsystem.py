@@ -66,6 +66,21 @@ BODIES = [
         },
     },
     {
+        "name": "Erdenmond",
+        "radius": 1737.4,
+        "color": "#C0C0C0",
+        "orbitRadius": 149.6,
+        "orbitalPeriod": 27.32,
+        "rotationPeriod": 27.32,
+        "parent": "Erde",
+        "info": {
+            "mass": "7,342 × 10²² kg",
+            "diameter": "3.474 km",
+            "temperature": "-173 bis 127 °C",
+            "description": "Einziger natürlicher Trabant der Erde. Die gleiche Seite zeigt immer zur Erde (gebundene Rotation).",
+        },
+    },
+    {
         "name": "Mars",
         "radius": 3389.5,
         "color": "#E5534B",

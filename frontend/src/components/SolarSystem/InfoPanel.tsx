@@ -1,8 +1,8 @@
 import { motion } from 'framer-motion';
-import { PlanetData, SUN_DATA } from '../../data/planets';
+import { PlanetData, MoonData, SUN_DATA } from '../../data/planets';
 
 interface InfoPanelProps {
-  data: PlanetData | typeof SUN_DATA | null;
+  data: PlanetData | MoonData | typeof SUN_DATA;
   onClose: () => void;
 }
 
@@ -64,10 +64,12 @@ export default function InfoPanel({ data, onClose }: InfoPanelProps) {
             <span className="text-gray-400">Atmosphäre:</span>
             <span>{data.atmosphere}</span>
           </div>
-          <div className="flex justify-between text-xs">
-            <span className="text-gray-400">Monde:</span>
-            <span>{data.moons}</span>
-          </div>
+          {'moons' in data && data.moons != null && (
+            <div className="flex justify-between text-xs">
+              <span className="text-gray-400">Monde:</span>
+              <span>{data.moons}</span>
+            </div>
+          )}
           <div className="flex justify-between text-xs">
             <span className="text-gray-400">Umlaufdauer:</span>
             <span>{data.period > 0 ? `${data.period} Jahre` : '—'}</span>

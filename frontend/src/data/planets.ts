@@ -28,6 +28,26 @@ export interface PlanetData {
   photoTip?: PhotoTip;
 }
 
+export interface MoonData {
+  name: string
+  nameDE: string
+  radius: number           // relative Größe (0.273 = 27% von Erde)
+  semiMajorAxis: number    // Abstand zum Elternplanet in Scene-Units (z.B. 2.5)
+  eccentricity: number
+  inclination: number      // Grad
+  period: number           // Umlaufzeit in Erdjahren (27.3 Tage = 0.0748)
+  rotationPeriod: number   // Eigenrotation in Stunden (27.3 Tage = 655.7h, gebundene Rotation)
+  textureMap: string
+  color?: string
+  description: string
+  mass: string
+  diameter: number
+  temperature: string
+  atmosphere: string
+  realPhotoUrl?: string
+  photoTip?: PhotoTip
+}
+
 export const SUN_DATA: PlanetData = {
   name: 'Sun',
   nameDE: 'Sonne',
@@ -268,3 +288,30 @@ export const PLANETS: PlanetData[] = [
     },
   },
 ];
+
+export const EARTH_MOONS: MoonData[] = [
+  {
+    name: 'Moon',
+    nameDE: 'Erdenmond',
+    radius: 0.273,
+    semiMajorAxis: 2.5,
+    eccentricity: 0.0549,
+    inclination: 5.145,
+    period: 0.0748,       // 27.32 Tage / 365.25
+    rotationPeriod: 655.7, // 27.32 Tage × 24h (gebundene Rotation)
+    textureMap: '/textures/moon-surface-texture-map-2k-equirectangu-1.jpg',
+    color: '#cccccc',
+    description: 'Unser ständiger Begleiter — der größte und hellste Himmelskörper am Nachthimmel. Die Oberfläche ist von Kratern, Ebenen (Maria) und Gebirgen geprägt.',
+    mass: '0,0123 Erdmassen',
+    diameter: 3474,
+    temperature: '-173 bis 127 °C',
+    atmosphere: 'Keine (Exosphäre aus He, Ne, Ar)',
+    realPhotoUrl: '/photos/earth-s-moon-full-disk-nasa-photo-high-r-1.jpg',
+    photoTip: {
+      exposure: '1/125s, ISO 200',
+      filter: 'Keiner notwendig',
+      bestTimes: 'Vollmond, Opposition',
+      notes: 'Leichtestes Himmelsobjekt nach der Sonne. Erdlicht (aschgraue Mondphasen) lohnt sich besonders.',
+    },
+  },
+]

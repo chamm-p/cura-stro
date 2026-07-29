@@ -4,7 +4,7 @@ import { Stars } from '@react-three/drei'
 import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing'
 import * as THREE from 'three'
 import { Link } from 'react-router-dom'
-import { PLANETS, SUN_DATA, type PlanetData } from '../data/planets'
+import { PLANETS, SUN_DATA, EARTH_MOONS, type PlanetData, type MoonData } from '../data/planets'
 import { Sun } from '../components/SolarSystem/Sun'
 import Orbit from '../components/SolarSystem/Orbit'
 import Planet from '../components/SolarSystem/Planet'
@@ -26,6 +26,8 @@ function Scene() {
   const { camera } = useThree()
   const selectedPlanet = useSolarSystemStore((s) => s.selectedPlanet)
   const selectPlanet = useSolarSystemStore((s) => s.selectPlanet)
+  const selectedMoon = useSolarSystemStore((s) => s.selectedMoon)
+  const selectMoon = useSolarSystemStore((s) => s.selectMoon)
 
   camera.position.set(0, 30, 60)
 
@@ -57,6 +59,8 @@ function Scene() {
               data={p}
               onClick={() => selectPlanet(p.name, [startX, 0, startZ])}
               isSelected={selectedPlanet === p.name}
+              moons={p.name === 'Earth' ? EARTH_MOONS : undefined}
+              onMoonClick={p.name === 'Earth' ? (moonData, pos) => selectMoon(moonData, pos) : undefined}
             />
           </group>
         )
@@ -76,6 +80,7 @@ function Scene() {
 
 export default function SolarSystem() {
   const selectedPlanet = useSolarSystemStore((s) => s.selectedPlanet)
+  const selectedMoon = useSolarSystemStore((s) => s.selectedMoon)
   const selectedData: PlanetData | null =
     selectedPlanet === SUN_DATA.name
       ? SUN_DATA
@@ -107,10 +112,19 @@ export default function SolarSystem() {
 
       <TimeWarpSlider />
 
+      {/* Planet InfoPanel */}
       {selectedData && (
         <InfoPanel
           data={selectedData}
           onClose={() => useSolarSystemStore.getState().clearSelection()}
+        />
+      )}
+
+      {/* Moon InfoPanel */}
+      {selectedMoon && !selectedData && (
+        <InfoPanel
+          data={selectedMoon}
+          onClose={() => useSolarSystemStore.getState().clearMoonSelection()}
         />
       )}
     </div>
