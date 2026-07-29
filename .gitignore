@@ -25,3 +25,14 @@ backend/outputs/
 # Foto-Archiv (lokaler Default-Ordner; Inhalt nicht versionieren)
 /archive/*
 !/archive/.gitkeep
+
+# Logs
+*.log
+bg.log
+server.log
+
+# Cache
+.cache/
+
+# Projekt-Metadaten (Sandbox-intern)
+.curai/
