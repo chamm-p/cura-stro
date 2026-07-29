@@ -33,7 +33,7 @@ export const useSolarSystemStore = create<SolarSystemState>((set) => ({
   selectedMoon: null,
   flyTarget: null,
   isFlying: false,
-  timeWarp: 1,
+  timeWarp: 0.5,
   resetTrigger: 0,
   simulatedDate: new Date(),
   planetPositions: {},
