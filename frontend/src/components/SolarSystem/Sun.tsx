@@ -73,10 +73,11 @@ export function Sun({ onClick }: SunProps) {
         distance={0}
         decay={0}
         castShadow
-        shadow-mapSize={[4096, 4096]}
-        shadow-camera-near={1}
-        shadow-camera-far={500}
-        shadow-bias={-0.001}
+        shadow-mapSize-width={1024}
+        shadow-mapSize-height={1024}
+        shadow-camera-near={0.5}
+        shadow-camera-far={80}
+        shadow-bias={-0.0005}
       />
     </group>
   )

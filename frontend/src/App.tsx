@@ -7,7 +7,6 @@ import Manage from './pages/Manage'
 import Calculator from './pages/Calculator'
 import SolarSystem from './pages/SolarSystem'
 import ProtectedRoute from './components/ProtectedRoute'
-import AmbientPlayer from './components/AmbientPlayer'
 
 export default function App() {
   return (
@@ -60,7 +59,6 @@ export default function App() {
         />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-      <AmbientPlayer />
     </>
   )
 }

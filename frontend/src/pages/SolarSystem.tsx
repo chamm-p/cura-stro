@@ -1,4 +1,4 @@
-import { Suspense } from 'react'
+import { Suspense, useRef, useEffect } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { Stars } from '@react-three/drei'
 import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing'
@@ -79,12 +79,27 @@ function Scene() {
 }
 
 export default function SolarSystem() {
+  const audioRef = useRef<HTMLAudioElement>(null)
   const selectedPlanet = useSolarSystemStore((s) => s.selectedPlanet)
   const selectedMoon = useSolarSystemStore((s) => s.selectedMoon)
   const selectedData: PlanetData | null =
     selectedPlanet === SUN_DATA.name
       ? SUN_DATA
       : PLANETS.find((p) => p.name === selectedPlanet) ?? null
+
+  useEffect(() => {
+    const el = audioRef.current
+    if (el) {
+      el.volume = 0.3
+      el.play().catch(() => {})
+    }
+    return () => {
+      if (el) {
+        el.pause()
+        el.currentTime = 0
+      }
+    }
+  }, [])
 
   return (
     <div className="relative w-full h-screen bg-black">
@@ -109,6 +124,8 @@ export default function SolarSystem() {
           <Scene />
         </Suspense>
       </Canvas>
+
+      <audio ref={audioRef} src="/audio/ambient.mp3" loop preload="auto" hidden />
 
       <TimeWarpSlider />
 
