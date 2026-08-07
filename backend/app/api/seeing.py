@@ -62,11 +62,16 @@ async def seeing_image(
     if not loc.meteoblue_url:
         raise HTTPException(404, "Kein meteoblue-Link für diesen Standort hinterlegt")
 
+    # no-store: der Browser darf das Bild NICHT eigenmächtig cachen (sonst
+    # hält er es per Heuristik tagelang für frisch und ignoriert 'aktualisieren').
+    # Frische steuert allein der Server über die TTL unten.
+    nocache = {"Cache-Control": "no-store, must-revalidate"}
+
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache = _CACHE_DIR / f"{loc.id}.png"
     ttl = settings.seeing_cache_ttl_min * 60
     if not refresh and cache.exists() and (time.time() - cache.stat().st_mtime) < ttl:
-        return FileResponse(cache, media_type="image/png")
+        return FileResponse(cache, media_type="image/png", headers=nocache)
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -76,7 +81,13 @@ async def seeing_image(
             r.raise_for_status()
             cache.write_bytes(r.content)
     except httpx.HTTPError as e:
-        if cache.exists():  # Stale-Cache besser als nichts.
-            return FileResponse(cache, media_type="image/png")
+        if cache.exists():  # Stale-Cache besser als nichts — aber sichtbar machen.
+            import logging
+            logging.getLogger("uvicorn.error").warning(
+                "Seeing-Scraper nicht erreichbar (%s) — liefere veraltetes Cache-Bild von %s",
+                e, time.strftime("%Y-%m-%d %H:%M", time.localtime(cache.stat().st_mtime)),
+            )
+            return FileResponse(cache, media_type="image/png",
+                                headers={**nocache, "X-Seeing-Stale": "1"})
         raise HTTPException(502, f"Seeing-Scraper nicht erreichbar: {e}")
-    return FileResponse(cache, media_type="image/png")
+    return FileResponse(cache, media_type="image/png", headers=nocache)

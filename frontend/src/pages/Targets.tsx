@@ -216,7 +216,8 @@ function SeeingPanel({ locationId }: { locationId: string }) {
     setLoading(true); setErr('')
     try {
       const r = await api.get('/api/seeing/image', {
-        params: { location_id: locationId, refresh },
+        // _t = Cache-Buster: eindeutige URL je Aufruf → nie aus dem Browser-Cache.
+        params: { location_id: locationId, refresh, _t: Date.now() },
         responseType: 'blob',
       })
       setSrc((prev) => { if (prev) URL.revokeObjectURL(prev); return URL.createObjectURL(r.data) })
