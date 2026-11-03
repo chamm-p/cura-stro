@@ -32,11 +32,50 @@ services:
     image: curastro-backend:dev
     container_name: curastro-backend
     restart: unless-stopped
-    env_file: .env
+    # .env ist OPTIONAL (required: false). Zwei gleichwertige Wege, die App zu
+    # konfigurieren:
+    #   (a) klassisch: eine .env-Datei neben dieser Compose (lokal / per SSH).
+    #   (b) Portainer/QNAP: KEINE Datei nötig — die Variablen im Stack-
+    #       "Environment"-Feld eintragen. Sie werden unten in environment:
+    #       interpoliert und so in den Container gereicht.
+    # Was in der .env steht, gewinnt NICHT über environment: — Compose setzt
+    # erst env_file, dann environment. Doppelte Pflege ist also unnötig; nutze
+    # entweder (a) oder (b).
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-curastro}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-curastro}
       SEEING_SCRAPER_URL: http://weather-scraper:8090
       ARCHIVE_ROOT: ${ARCHIVE_ROOT:-/archive}
+      # ── App / Auth ──
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:9601}
+      SECRET_KEY: ${SECRET_KEY:-CHANGE_ME}
+      # ── Lokaler Fallback-User ──
+      DEFAULT_USER_ENABLED: ${DEFAULT_USER_ENABLED:-true}
+      DEFAULT_USER_USERNAME: ${DEFAULT_USER_USERNAME:-astro}
+      DEFAULT_USER_EMAIL: ${DEFAULT_USER_EMAIL:-astro@example.com}
+      DEFAULT_USER_PASSWORD: ${DEFAULT_USER_PASSWORD:-changeme}
+      # ── OIDC / Keycloak (leer = nur lokaler Login) ──
+      OIDC_DISCOVERY_URL: ${OIDC_DISCOVERY_URL:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-}
+      OIDC_PROVIDER_LABEL: ${OIDC_PROVIDER_LABEL:-Keycloak}
+      # ── MCP ──
+      MCP_TOKEN: ${MCP_TOKEN:-}
+      # ── Vision-LLM (meteoblue-Wolken) ──
+      LLM_GATEWAY_URL: ${LLM_GATEWAY_URL:-}
+      LLM_TOKEN: ${LLM_TOKEN:-}
+      LLM_VISION_MODEL: ${LLM_VISION_MODEL:-original/Qwen3.6}
+      CLOUD_REFRESH_ENABLED: ${CLOUD_REFRESH_ENABLED:-true}
+      CLOUD_REFRESH_HOUR: ${CLOUD_REFRESH_HOUR:-16}
+      # ── PixInsight-Agents ──
+      PIXINSIGHT_AGENT_URL: ${PIXINSIGHT_AGENT_URL:-}
+      PIXINSIGHT_AGENT_NAME: ${PIXINSIGHT_AGENT_NAME:-Mac}
+      PIXINSIGHT_AGENT_URL_2: ${PIXINSIGHT_AGENT_URL_2:-}
+      PIXINSIGHT_AGENT_NAME_2: ${PIXINSIGHT_AGENT_NAME_2:-Windows}
+      PIXINSIGHT_AGENT_TOKEN: ${PIXINSIGHT_AGENT_TOKEN:-}
     ports:
       - "${BACKEND_PORT:-9605}:8000"
     volumes:
