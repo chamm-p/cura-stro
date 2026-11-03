@@ -1,7 +1,5 @@
 """Objekt-Detail inkl. Hintergrundinfos (Phase 3b)."""
 
-from urllib.parse import urlencode
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,17 +9,14 @@ from app.database import get_db
 from app.models.catalog import CatalogObject
 from app.models.user import User
 from app.services import object_info as oi
+from app.services import sky_preview
 
 router = APIRouter(prefix="/api/objects", tags=["objects"])
-
-_HIPS2FITS = "https://alasky.cds.unistra.fr/hips-image-services/hips2fits"
 
 
 def _preview_url(ra: float, dec: float, size_major_arcmin: float | None) -> str:
     fov = min(max((size_major_arcmin or 30) / 60.0 * 2.0, 0.3), 3.0)
-    q = urlencode({"hips": "CDS/P/DSS2/color", "ra": round(ra, 5), "dec": round(dec, 5),
-                   "fov": round(fov, 4), "width": 500, "height": 500, "projection": "TAN", "format": "jpg"})
-    return f"{_HIPS2FITS}?{q}"
+    return sky_preview.build_url(ra, dec, fov, px=500)
 
 
 @router.get("/{ident}")

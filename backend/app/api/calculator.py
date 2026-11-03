@@ -13,7 +13,6 @@ deren Verhältnisse (Bortle, f-Verhältnis, Schmal-/Breitband) stimmen.
 
 import math
 import uuid
-from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
@@ -24,6 +23,7 @@ from app.database import get_db
 from app.models.catalog import CatalogObject
 from app.models.observing import Camera, Filter, Location, Setup, Telescope, setup_filters
 from app.models.user import User
+from app.services import sky_preview
 
 router = APIRouter(prefix="/api/calculator", tags=["calculator"])
 
@@ -55,11 +55,7 @@ def _bandwidth_angstrom(f: Filter) -> float:
 
 def _preview_url(ra: float, dec: float, fov_deg: float) -> str:
     fov = min(max(fov_deg, 0.05), 5.0)
-    q = urlencode({
-        "hips": "CDS/P/DSS2/color", "ra": round(ra, 5), "dec": round(dec, 5),
-        "fov": round(fov, 4), "width": 360, "height": 360, "projection": "TAN", "format": "jpg",
-    })
-    return f"https://alasky.cds.unistra.fr/hips-image-services/hips2fits?{q}"
+    return sky_preview.build_url(ra, dec, fov, px=360)
 
 
 @router.get("")

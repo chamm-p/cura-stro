@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 
 from app.api import auth, calculator, equipment, geocode, health, images, locations, objects, observations, seeing, targets, users
-from app.api import archive, asiair, clouds as clouds_api, file_import, mcp_config, results as results_api, slideshow, subframes
+from app.api import archive, asiair, clouds as clouds_api, file_import, mcp_config, results as results_api, sky, slideshow, subframes
 from app.api import pixinsight as pixinsight_api
 from app.api import settings as settings_api
 from app.api import solarsystem
@@ -150,6 +150,7 @@ app.include_router(observations.router)
 app.include_router(images.router)
 app.include_router(calculator.router)
 app.include_router(objects.router)
+app.include_router(sky.router)
 app.include_router(mcp_config.router)
 app.include_router(slideshow.router)
 app.include_router(asiair.router)

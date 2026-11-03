@@ -2,7 +2,6 @@
 
 import uuid
 from datetime import datetime
-from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -17,11 +16,9 @@ from app.models.observation import Observation
 from app.models.observing import Location, Telescope
 from app.models.user import User
 from app.schemas.targets import TargetListOut, TargetOut
-from app.services import astro, cloud_vision, clouds, weather
+from app.services import astro, cloud_vision, clouds, sky_preview, weather
 
 router = APIRouter(prefix="/api/targets", tags=["targets"])
-
-_HIPS2FITS = "https://alasky.cds.unistra.fr/hips-image-services/hips2fits"
 
 # Grober Typ → Filtergruppe (bewusst nicht granular).
 _TYPE_GROUP = {
@@ -44,19 +41,7 @@ def _preview_url(ra: float, dec: float, size_major_arcmin: float | None) -> str:
         fov = min(max(size_major_arcmin / 60.0 * 2.0, 0.3), 3.0)
     else:
         fov = 0.5
-    q = urlencode(
-        {
-            "hips": "CDS/P/DSS2/color",
-            "ra": round(ra, 5),
-            "dec": round(dec, 5),
-            "fov": round(fov, 4),
-            "width": 320,
-            "height": 320,
-            "projection": "TAN",
-            "format": "jpg",
-        }
-    )
-    return f"{_HIPS2FITS}?{q}"
+    return sky_preview.build_url(ra, dec, fov, px=320)
 
 
 async def _resolve_location(db: AsyncSession, user: User, location_id: str | None) -> Location:
