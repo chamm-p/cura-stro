@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import io
 import logging
+import time
 from pathlib import Path
 
 import httpx
@@ -29,6 +30,12 @@ from app.config import get_settings
 
 log = logging.getLogger("uvicorn.error")
 _cfg = get_settings()
+
+# Einfacher Circuit-Breaker: Ist CDS gerade nicht erreichbar, nicht bei JEDEM
+# der (bis zu 300) Previews aufs Neue 3×4 s hineinlaufen — nach einem Fehlschlag
+# CDS für _CDS_COOLDOWN Sekunden überspringen und direkt STScI nehmen.
+_CDS_COOLDOWN = 300.0
+_cds_down_until = 0.0
 
 # CDS Straßburg (hips2fits) + Mirror. Alle sprechen dieselbe API, nur der
 # Host unterscheidet sich. ACHTUNG: Die Mirror liegen in derselben CDS-
@@ -86,16 +93,26 @@ def _to_jpeg(data: bytes, px: int) -> bytes:
 
 
 def _fetch_hips(ra: float, dec: float, fov: float, px: int) -> bytes | None:
+    global _cds_down_until
+    if time.time() < _cds_down_until:
+        return None  # CDS kürzlich down → überspringen (Circuit-Breaker)
+
     params = _params(ra, dec, fov, px)
+    # Kurzer Connect-Timeout: ist CDS down, soll die Kette SCHNELL zum
+    # STScI-Fallback durchfallen (sonst 3×20 s = Request-Timeout/502).
+    # Lese-Timeout großzügig, da das Rendern serverseitig dauern kann.
+    to = httpx.Timeout(connect=4.0, read=20.0, write=10.0, pool=4.0)
     for base in _HIPS_HOSTS:
         try:
-            with httpx.Client(timeout=20.0, follow_redirects=True) as c:
+            with httpx.Client(timeout=to, follow_redirects=True) as c:
                 r = c.get(base, params=params)
                 r.raise_for_status()
                 if "image" in r.headers.get("content-type", "") and r.content:
                     return r.content
         except Exception as e:  # noqa: BLE001
             log.warning("sky-preview: hips %s nicht erreichbar (%s)", base, e)
+    # Kein CDS-Host lieferte → für eine Weile überspringen.
+    _cds_down_until = time.time() + _CDS_COOLDOWN
     return None
 
 
@@ -105,8 +122,9 @@ def _fetch_stsci(ra: float, dec: float, fov: float, px: int) -> bytes | None:
     params = {"v": "poss2ukstu_red", "r": round(ra, 5), "d": round(dec, 5),
               "e": "J2000", "h": round(arcmin, 2), "w": round(arcmin, 2),
               "f": "gif", "c": "none"}
+    to = httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0)
     try:
-        with httpx.Client(timeout=30.0, follow_redirects=True) as c:
+        with httpx.Client(timeout=to, follow_redirects=True) as c:
             r = c.get(_STSCI, params=params)
             r.raise_for_status()
             if "image" in r.headers.get("content-type", "") and r.content:
