@@ -98,10 +98,10 @@ def _fetch_hips(ra: float, dec: float, fov: float, px: int) -> bytes | None:
         return None  # CDS kürzlich down → überspringen (Circuit-Breaker)
 
     params = _params(ra, dec, fov, px)
-    # Kurzer Connect-Timeout: ist CDS down, soll die Kette SCHNELL zum
-    # STScI-Fallback durchfallen (sonst 3×20 s = Request-Timeout/502).
-    # Lese-Timeout großzügig, da das Rendern serverseitig dauern kann.
-    to = httpx.Timeout(connect=4.0, read=20.0, write=10.0, pool=4.0)
+    # Kurze Timeouts: ist CDS down (auch "nimmt Verbindung an, antwortet aber
+    # nicht"), soll die Kette SCHNELL zum STScI-Fallback durchfallen. Nach dem
+    # ersten Fehlschlag greift ohnehin der Circuit-Breaker für alle weiteren.
+    to = httpx.Timeout(connect=4.0, read=6.0, write=6.0, pool=4.0)
     for base in _HIPS_HOSTS:
         try:
             with httpx.Client(timeout=to, follow_redirects=True) as c:
@@ -118,7 +118,10 @@ def _fetch_hips(ra: float, dec: float, fov: float, px: int) -> bytes | None:
 
 def _fetch_stsci(ra: float, dec: float, fov: float, px: int) -> bytes | None:
     """STScI DSS (unabhängig von CDS). Feldgröße in Bogenminuten; GIF."""
-    arcmin = max(min(fov * 60.0, 60.0), 2.0)  # STScI-Limit ~60'
+    # Feldgröße deckeln: die Preview-Kachel ist klein (≤500 px), ein großes
+    # Feld macht das GIF nur riesig (langsame Dekodierung), ohne sichtbaren
+    # Gewinn. 2'–25' ist ein guter Kompromiss aus Übersicht und Tempo.
+    arcmin = max(min(fov * 60.0, 25.0), 2.0)
     params = {"v": "poss2ukstu_red", "r": round(ra, 5), "d": round(dec, 5),
               "e": "J2000", "h": round(arcmin, 2), "w": round(arcmin, 2),
               "f": "gif", "c": "none"}
