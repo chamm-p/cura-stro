@@ -122,18 +122,24 @@ def _fetch_stsci(ra: float, dec: float, fov: float, px: int) -> bytes | None:
     # Feld macht das GIF nur riesig (langsame Dekodierung), ohne sichtbaren
     # Gewinn. 2'–25' ist ein guter Kompromiss aus Übersicht und Tempo.
     arcmin = max(min(fov * 60.0, 25.0), 2.0)
-    params = {"v": "poss2ukstu_red", "r": round(ra, 5), "d": round(dec, 5),
-              "e": "J2000", "h": round(arcmin, 2), "w": round(arcmin, 2),
-              "f": "gif", "c": "none"}
     to = httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0)
-    try:
-        with httpx.Client(timeout=to, follow_redirects=True) as c:
-            r = c.get(_STSCI, params=params)
-            r.raise_for_status()
-            if "image" in r.headers.get("content-type", "") and r.content:
-                return r.content
-    except Exception as e:  # noqa: BLE001
-        log.warning("sky-preview: STScI nicht erreichbar (%s)", e)
+    # Plattenreihenfolge: POSS2/UKSTU_red ist feiner, deckt aber nicht den
+    # ganzen Himmel (nördliche Felder fehlen teils → STScI liefert dann eine
+    # HTML-Fehlerseite "image file was not created"). POSS1_red hat volle
+    # Abdeckung als Fallback.
+    for plate in ("poss2ukstu_red", "poss1_red"):
+        params = {"v": plate, "r": round(ra, 5), "d": round(dec, 5),
+                  "e": "J2000", "h": round(arcmin, 2), "w": round(arcmin, 2),
+                  "f": "gif", "c": "none"}
+        try:
+            with httpx.Client(timeout=to, follow_redirects=True) as c:
+                r = c.get(_STSCI, params=params)
+                r.raise_for_status()
+                if "image" in r.headers.get("content-type", "") and r.content:
+                    return r.content
+                # 200 + text/html = "image file was not created" → nächste Platte
+        except Exception as e:  # noqa: BLE001
+            log.warning("sky-preview: STScI (%s) nicht erreichbar (%s)", plate, e)
     return None
 
 
