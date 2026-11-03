@@ -36,3 +36,6 @@ server.log
 
 # Projekt-Metadaten (Sandbox-intern)
 .curai/
+
+# Backups (lokal, nicht versionieren)
+deploy/backups/
