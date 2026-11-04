@@ -39,3 +39,7 @@ server.log
 
 # Backups (lokal, nicht versionieren)
 deploy/backups/
+
+# Host-spezifisches Compose-Override (z. B. zulu-net-Anbindung auf dem QNAP).
+# Bleibt lokal pro Host — die gemeinsame docker-compose.yml bleibt generisch.
+deploy/docker-compose.override.yml

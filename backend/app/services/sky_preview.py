@@ -118,10 +118,13 @@ def _fetch_hips(ra: float, dec: float, fov: float, px: int) -> bytes | None:
 
 def _fetch_stsci(ra: float, dec: float, fov: float, px: int) -> bytes | None:
     """STScI DSS (unabhängig von CDS). Feldgröße in Bogenminuten; GIF."""
-    # Feldgröße deckeln: die Preview-Kachel ist klein (≤500 px), ein großes
-    # Feld macht das GIF nur riesig (langsame Dekodierung), ohne sichtbaren
-    # Gewinn. 2'–25' ist ein guter Kompromiss aus Übersicht und Tempo.
-    arcmin = max(min(fov * 60.0, 25.0), 2.0)
+    # WICHTIG: Das Feld muss der angefragten FOV entsprechen (fov ist in Grad),
+    # sonst wird zu eng ausgeschnitten und das Objekt erscheint zu groß. Darum
+    # arcmin = fov*60, nur nach oben gedeckelt: STScI liefert bis ~120' (darüber
+    # Fehlerseite), aber 120' = ~14 MB GIF (langsame Dekodierung). 75' ist ein
+    # guter Kompromiss — deckt praktisch alle DSOs feldgetreu ab; nur die ganz
+    # großen (M31 & Co.) werden minimal enger, fallen aber ohnehin groß aus.
+    arcmin = max(min(fov * 60.0, 75.0), 2.0)
     to = httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0)
     # Plattenreihenfolge: POSS2/UKSTU_red ist feiner, deckt aber nicht den
     # ganzen Himmel (nördliche Felder fehlen teils → STScI liefert dann eine
