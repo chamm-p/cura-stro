@@ -30,6 +30,8 @@ async def sky_preview_image(
         path = await asyncio.to_thread(sky_preview.fetch_cached, ra, dec, fov, px)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"Vorschau nicht verfügbar: {e}")
-    # Lange cachen: Katalog-Objekte ändern sich nie.
+    # Lange cachen: Katalog-Objekte ändern sich nie. Der Graustufen-Notnagel nur
+    # kurz, damit der Browser später das Farbbild holt.
+    max_age = 3600 if path.name.endswith(".gray.jpg") else 604800
     return FileResponse(path, media_type="image/jpeg",
-                        headers={"Cache-Control": "public, max-age=604800"})
+                        headers={"Cache-Control": f"public, max-age={max_age}"})
